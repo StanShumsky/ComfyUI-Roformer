@@ -1,0 +1,10 @@
+huggingface_hub>=0.24
+soundfile
+soxr
+PyYAML
+rotary-embedding-torch
+einops
+beartype
+librosa
+packaging
+neuraloperator==1.0.2  # FNO1d mask estimator for the BS-Roformer-Inst-FNO checkpoint (version it was trained with)

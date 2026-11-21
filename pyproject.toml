@@ -1,0 +1,23 @@
+[project]
+name = "comfyui-roformer"
+description = "Music source separation nodes for the 13 pcunwa Roformer releases on Hugging Face (36 checkpoints): custom loader, chunked inference, stem extraction and saving."
+version = "0.1.0"
+license = { file = "LICENSE" }
+dependencies = ["huggingface_hub>=0.24", "soundfile", "soxr", "PyYAML", "rotary-embedding-torch", "einops", "beartype", "librosa", "packaging"]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Environment :: GPU :: Apple Metal",
+]
+
+[project.urls]
+Repository = "https://github.com/StanShumsky/ComfyUI-Roformer"
+
+[tool.comfy]
+PublisherId = "shumsky"
+DisplayName = "ComfyUI-Roformer"
+Icon = "https://raw.githubusercontent.com/StanShumsky/ComfyUI-Roformer/main/icon.png"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

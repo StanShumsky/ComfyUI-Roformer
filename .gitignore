@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.pytest_cache/
+unsloth-tmp/
+appdata/
+npm-cache/
+.cache/
+.unsloth-packages/
+*.egg-info/
+dist/
+build/
