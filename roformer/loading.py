@@ -94,8 +94,8 @@ def load_yaml_config(path: Path) -> dict:
 
 
 def check_weights(state: dict, name: str) -> None:
-    """Corrupt-download guard (same idea as the Dettato pack): a truncated or zero-filled file
-    still strict-loads but predicts garbage, so it is caught here instead."""
+    """Corrupt-download guard: a truncated or zero-filled file still strict-loads but
+    predicts garbage, so it is caught here instead."""
     checked = 0
     nonfinite, zeros = [], []
     for key, value in state.items():

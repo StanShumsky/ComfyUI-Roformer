@@ -66,7 +66,92 @@ def _install_stubs() -> None:
     sys.modules["comfy.utils"] = cu
 
 
+def _install_comfy_api_stub() -> None:
+    """The real comfy_api.latest drags in the whole ComfyUI runtime; the tests only need the io
+    surface the nodes use, so install a minimal stand-in when the real one is not importable."""
+    try:
+        import comfy_api.latest  # noqa: F401
+        return
+    except Exception:  # noqa: BLE001
+        pass
+
+    class _Base:
+        def __init__(self, id=None, display_name=None, tooltip=None, optional=False, default=None, **kwargs):
+            self.id, self.display_name, self.tooltip, self.optional = id, display_name, tooltip, optional
+            self.default, self.kwargs = default, kwargs
+
+    def _custom(io_type):
+        t = io_type  # class bodies do not close over function locals; bind under a plain name
+
+        class _CustomInput(_Base):
+            io_type = t
+
+        class _CustomOutput(_Base):
+            io_type = t
+
+        outer = type("Custom", (), {"io_type": t})
+        outer.Input = _CustomInput
+        outer.Output = _CustomOutput
+        return outer
+
+    class _Audio:
+        Input = _Base
+        Output = _Base
+
+    class _Combo:
+        class Input(_Base):
+            def __init__(self, id=None, options=None, display_name=None, tooltip=None,
+                         optional=False, default=None, **kwargs):
+                super().__init__(id, display_name, tooltip, optional, **kwargs)
+                self.options = options or []
+                self.default = default
+
+    class _Int:
+        Input = _Base
+
+    class _String:
+        Input = _Base
+        Output = _Base
+
+    class _Schema:
+        def __init__(self, node_id=None, display_name=None, category=None, description=None,
+                     inputs=None, outputs=None, **kwargs):
+            self.node_id, self.display_name, self.category = node_id, display_name, category
+            self.description = description
+            self.inputs, self.outputs = inputs or [], outputs or []
+            self.is_output_node = kwargs.get("is_output_node", False)
+            # mirror the real Schema finalization: outputs without ids get default ids
+            for i, output in enumerate(self.outputs):
+                if getattr(output, "id", None) is None:
+                    output.id = f"_{i}_{getattr(output, 'io_type', 'X')}_"
+
+    class _ComfyNode:
+        pass
+
+    class _NodeOutput:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.ui = kwargs.get("ui")
+
+        @property
+        def result(self):
+            return self.args if len(self.args) > 0 else None
+
+    io = types.SimpleNamespace(
+        Custom=_custom, Audio=_Audio, Combo=_Combo, Int=_Int, String=_String,
+        Schema=_Schema, ComfyNode=_ComfyNode, NodeOutput=_NodeOutput,
+    )
+    latest = types.ModuleType("comfy_api.latest")
+    latest.io = io
+    latest.ComfyExtension = type("ComfyExtension", (), {})
+    comfy_api = types.ModuleType("comfy_api")
+    comfy_api.latest = latest
+    sys.modules["comfy_api"] = comfy_api
+    sys.modules["comfy_api.latest"] = latest
+
+
 _install_stubs()
+_install_comfy_api_stub()
 _spec = importlib.util.spec_from_file_location(
     "roformernode", ROOT / "__init__.py", submodule_search_locations=[str(ROOT)]
 )
@@ -82,6 +167,16 @@ sys.modules.setdefault("__init__", _pkg)
 @pytest.fixture(scope="session")
 def nodes():
     return sys.modules["roformernode.nodes"]
+
+
+@pytest.fixture(scope="session")
+def manifest():
+    return sys.modules["roformernode.roformer.manifest"].MODELS
+
+
+@pytest.fixture(scope="session")
+def stem_names():
+    return sys.modules["roformernode.roformer.stem_names"]
 
 
 @pytest.fixture

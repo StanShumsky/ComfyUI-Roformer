@@ -20,10 +20,10 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
-      "title": "Roformer \u2014 Vocal / Instrumental",
+      "title": "Roformer \u2014 Stem Separation",
       "properties": {},
       "widgets_values": [
-        "## Roformer \u2014 Vocal / Instrumental\n\nMusic source separation with the [pcunwa Roformer checkpoints](https://huggingface.co/pcunwa/models) (13 releases, 36 checkpoints, all 44.1 kHz stereo RoFormers).\n\n**Loader**\n- `model`: any checkpoint id, or a folder in `models/roformer` holding a `.ckpt` plus its config YAML. Weights auto-download from Hugging Face into `models/roformer` on first use (0.2-1.7 GB).\n- `device`: `auto` (ComfyUI's device), `cuda`, `mps`, `cpu`.\n\n**Separate**\n- Takes any `AUDIO` (Load Audio, or a video's audio track) at any sample rate; stems come back at the file's own rate.\n- `chunk_seconds`: 0 = the model's training window (recommended); set e.g. 10 for low-VRAM machines.\n- Outputs: the stems payload, the target stem and the other stem as ready AUDIO, and `info_json`.\n\n**Outputs**\n- `Roformer Save Audio`: every stem (or one named stem) as lossless WAV/FLAC in the output folder.\n- `Roformer To Audio`: pull any named stem out of the payload for further nodes.\n\nGPU strongly recommended; the big mel-band models want >= 10 GB VRAM."
+        "## Roformer \u2014 Stem Separation\n\nMusic source separation with the [pcunwa Roformer checkpoints](https://huggingface.co/pcunwa/models) (41 checkpoints: the 13 pcunwa releases plus community releases, all 44.1 kHz stereo RoFormers).\n\n**Loader**\n- `model`: any checkpoint id, or a folder in `models/roformer` holding a `.ckpt` plus its config YAML. Weights auto-download from Hugging Face into `models/roformer` on first use (45 MB-1.7 GB).\n- `device`: `auto` (ComfyUI's device), `cuda`, `mps`, `cpu`.\n- `stems` (output): the model's stem names as text, for preview.\n\n**Separate**\n- Takes any `AUDIO` (Load Audio, or a video's audio track) at any sample rate; stems come back at the file's own rate.\n- `chunk_seconds`: 0 = the model's training window (recommended); set e.g. 10 for low-VRAM machines.\n- Outputs: the stems payload, the target stem and the other stem as ready AUDIO, and `info_json`.\n\n**Outputs**\n- `Roformer Save Audio`: every stem as lossless WAV/FLAC in the output folder.\n- `Roformer To Audio`: pull any named stem out of the payload for further nodes.\n- Preview Audio: the target stem, for a quick listen.\n\nGPU strongly recommended; the big mel-band models want >= 10 GB VRAM."
       ]
     },
     {
@@ -48,11 +48,16 @@
           "links": [
             3
           ]
+        },
+        {
+          "name": "stems",
+          "type": "STRING",
+          "links": []
         }
       ],
       "properties": {},
       "widgets_values": [
-        "leap-voc",
+        "sw-6stem",
         "auto"
       ]
     },
@@ -167,7 +172,6 @@
       "properties": {},
       "widgets_values": [
         "roformer/stem",
-        "",
         "wav"
       ]
     },

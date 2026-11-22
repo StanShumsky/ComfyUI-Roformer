@@ -29,7 +29,8 @@ loader.
 `Load Audio → Roformer Loader → Roformer Separate`, then:
 
 - **Roformer Save Audio** writes one file per stem into the output folder, or
-- **Roformer To Audio** picks any single stem as live audio for the rest of the graph.
+- **Roformer To Audio** picks a single stem from a dropdown as live audio for the rest of the
+  graph (the model's own stem list is on the Loader's `stems` output).
 
 The loader defaults to `sw-6stem` — six stems at once (bass, drums, other, vocals,
 guitar, piano). For vocals / instrumental, pick one of the two-way models
@@ -48,6 +49,8 @@ All nodes are in the `audio/Roformer` category.
   automatically on first use; a corrupt download is detected and the error tells you to
   delete the model folder and retry.
 - `device` — `auto` (ComfyUI's device), `cuda`, `mps`, `cpu`.
+- Outputs: the model payload, and `stems` — the model's stem names as text, in the order the
+  model trained them in; preview with any text display or wire it where you like.
 
 ### Roformer Separate
 Runs the loaded model on ComfyUI `AUDIO` (from **Load Audio**, or the audio track of a
@@ -64,25 +67,26 @@ model's trained channel count automatically.
   - `info_json` — model, stem names, lengths, rates.
 
 ### Roformer To Audio
-Extracts one named stem from a stems payload as `AUDIO` (the name from `info_json`; empty =
-the target stem), for feeding any other node.
+Extracts one stem from a stems payload as `AUDIO` for feeding any other node. `stem` is a
+dropdown of every stem name the pack knows about, sorted by priority (vocals first, then the
+instrumental, drums, bass, guitar, piano, other) and merged case-insensitively — one
+`vocals`, one `instrument`, one `other`, regardless of how the model spells them (the model's
+own list is on the Loader's `stems` output). Matching is the mirror image — case-insensitive
+and alias-tolerant (`instrument` picks a payload's `Instrumental`) — so `(auto)` (the default,
+the model's target) or a stale choice always falls back to the first stem and can never fail
+a run.
+
+### Custom Roformer To Audio
+The same extraction with the stem **typed by hand** instead of picked from the dropdown —
+the name from `info_json`, matched case-insensitively (empty = the target stem). Use it for
+local models and custom checkpoints whose stem names are not in the standard list.
 
 ### Roformer Save Audio
 Writes the stems to ComfyUI's output folder as `<prefix>_XXXXX_<stem>.wav` / `.flac`
-(lossless), numbered so runs never overwrite each other. `stem` empty = every stem.
+(lossless), numbered so runs never overwrite each other. Every stem in the payload is saved.
 
 ### Roformer Info
 The separation summary as a JSON string, for branching or saving run metadata.
-
-## Working with ComfyUI-Dettato
-
-[ComfyUI-Dettato](https://github.com/StanShumsky/ComfyUI-Dettato) transcribes audio to MIDI. Its
-Transcribe node accepts a stems payload directly, so separation-to-MIDI is
-`Separate → Transcribe → Save MIDI`: every stem is transcribed separately and merged into one
-phase-aligned `.mid`, its tracks named by stem (`Piano`, `Drums (bass)`, ...). For per-stem
-control, pick stems with Roformer To Audio, run one Dettato Transcribe per stem with its own
-stage chain, and combine the results with Dettato Merge MIDI. See the Dettato pack's README,
-"Working with ComfyUI-Roformer".
 
 ## Models
 
@@ -154,7 +158,7 @@ Single-task fine-tunes the generic separators don't cover.
 | `kim-ft2` | vocals + residual | Mel-Band-Roformer | 913 MB | [Kim-Mel-Band-Roformer-FT](https://huggingface.co/pcunwa/Kim-Mel-Band-Roformer-FT) (gated) |
 | `kim-ft2-bleedless` | vocals + residual | Mel-Band-Roformer | 913 MB | [Kim-Mel-Band-Roformer-FT](https://huggingface.co/pcunwa/Kim-Mel-Band-Roformer-FT) (gated) |
 | `kim-ft3-prev` | vocals + residual | Mel-Band-Roformer | 913 MB | [Kim-Mel-Band-Roformer-FT](https://huggingface.co/pcunwa/Kim-Mel-Band-Roformer-FT) (gated) |
-| `melband-big-beta1` … `melband-big-beta7`, `melband-big-beta6x` | vocals + residual | Mel-Band-Roformer | 0.9-1.7 GB | [Mel-Band-Roformer-big](https://huggingface.co/pcunwa/Mel-Band-Roformer-big) |
+| `melband-big-beta1` … `beta4`, `beta6`, `beta6x`, `beta7` (`beta5` in the vocals-target table) | vocals + residual | Mel-Band-Roformer | 0.9-1.7 GB | [Mel-Band-Roformer-big](https://huggingface.co/pcunwa/Mel-Band-Roformer-big) |
 
 ### Experimental
 

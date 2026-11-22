@@ -1,4 +1,4 @@
-"""ComfyUI AUDIO payloads <-> tensors, at the file's own sample rate (Dettato's track_io pattern)."""
+"""ComfyUI AUDIO payloads <-> tensors, at the file's own sample rate."""
 from __future__ import annotations
 
 import torch

@@ -10,32 +10,46 @@ import torch
 
 
 def test_node_schemas(nodes):
+    """V3: every node's schema (node_id / display name / category / description / io ids) is consistent."""
     assert set(nodes.NODE_CLASS_MAPPINGS) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS)
     assert set(nodes.NODE_CLASS_MAPPINGS) == {
-        "RoformerLoader", "RoformerSeparate", "RoformerToAudio", "RoformerSaveAudio", "RoformerInfo",
+        "RoformerLoader", "RoformerSeparate", "RoformerToAudio", "CustomRoformerToAudio",
+        "RoformerSaveAudio", "RoformerInfo",
     }
+    categories = set()
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
-        assert isinstance(cls.DESCRIPTION, str) and cls.DESCRIPTION
-        assert cls.CATEGORY == "audio/Roformer"
-        assert callable(getattr(cls, cls.FUNCTION))
-        returns = cls.RETURN_TYPES
-        assert len(returns) == len(getattr(cls, "RETURN_NAMES", returns))
-        required = cls.INPUT_TYPES()["required"]
-        assert required
-        for spec in required.values():
-            assert isinstance(spec, tuple) and len(spec) in (1, 2)
-            if isinstance(spec[0], list):
-                assert spec[0]
+        schema = cls.define_schema()
+        assert schema.node_id == name
+        assert schema.display_name == nodes.NODE_DISPLAY_NAME_MAPPINGS[name]
+        categories.add(schema.category)
+        assert isinstance(schema.description, str) and schema.description
+        assert schema.inputs
+        in_ids = [i.id for i in schema.inputs]
+        assert len(in_ids) == len(set(in_ids))
+        out_ids = [o.id for o in schema.outputs]
+        assert len(out_ids) == len(set(out_ids))
+    assert len(categories) == 1  # one menu category for the whole pack
+
+
+def test_v3_entrypoint_lists_all_nodes(nodes):
+    import asyncio
+
+    import roformernode
+
+    ext = asyncio.run(roformernode.comfy_entrypoint())
+    node_list = asyncio.run(ext.get_node_list())
+    assert [c.__name__ for c in node_list] == list(nodes.NODE_CLASS_MAPPINGS)
 
 
 def test_loader_choices(nodes, models_dir, tiny_model):
-    required = nodes.RoformerLoader.INPUT_TYPES()["required"]
-    assert set(required) == {"model", "device"}
-    choices = required["model"][0]
+    schema = nodes.RoformerLoader.define_schema()
+    inputs = {i.id: i for i in schema.inputs}
+    assert set(inputs) == {"model", "device"}
+    choices = inputs["model"].options
     assert "leap-voc" in choices and "melband-small" in choices and "melband-big-beta7" in choices
     # a local collection folder appears in the dropdown
     assert "tiny" in choices
-    assert required["device"][0][0] == "auto"
+    assert inputs["device"].default == "auto"
 
 
 # --------------------------------------------------------------------- audio
@@ -58,14 +72,15 @@ def test_audio_to_tensor(nodes, make_audio):
 
 
 def test_load_and_separate(nodes, models_dir, tiny_model, make_audio):
-    wrapper, = nodes.RoformerLoader().load("tiny", "cpu")
+    wrapper, stems_text = nodes.RoformerLoader.execute("tiny", "cpu").args
     assert wrapper["family"] == "bs" and wrapper["target"] == "vocals"
     assert wrapper["stems"] == ["vocals", "other"]
+    assert stems_text == "vocals, other"  # the loader's text output, for previewing
     assert wrapper["num_channels"] == 2 and wrapper["sample_rate"] == 44100
 
     audio = make_audio(t=2.0, rate=44100, channels=2)
-    payload = nodes.RoformerSeparate().separate(wrapper, audio, 0)
-    stems_payload, target_audio, other_audio, info_json = payload
+    out = nodes.RoformerSeparate.execute(wrapper, audio, 0)
+    stems_payload, target_audio, other_audio, info_json = out.args
     assert set(stems_payload["stems"]) == {"vocals", "other"}
     for name, wave in stems_payload["stems"].items():
         assert wave.shape == (2, 88200), name
@@ -79,18 +94,18 @@ def test_load_and_separate(nodes, models_dir, tiny_model, make_audio):
 
 
 def test_separate_resamples_to_source_rate(nodes, models_dir, tiny_model, make_audio):
-    wrapper, = nodes.RoformerLoader().load("tiny", "cpu")
+    wrapper, stems_text = nodes.RoformerLoader.execute("tiny", "cpu").args
     audio = make_audio(t=1.0, rate=48000, channels=2)
-    stems_payload, _, _, _ = nodes.RoformerSeparate().separate(wrapper, audio, 0)
+    stems_payload, _, _, _ = nodes.RoformerSeparate.execute(wrapper, audio, 0).args
     assert stems_payload["sample_rate"] == 48000
     for wave in stems_payload["stems"].values():
         assert wave.shape[1] == pytest.approx(48000, rel=0.005)  # soxr resample length
 
 
 def test_separate_chunk_override(nodes, models_dir, tiny_model, make_audio):
-    wrapper, = nodes.RoformerLoader().load("tiny", "cpu")
+    wrapper, stems_text = nodes.RoformerLoader.execute("tiny", "cpu").args
     audio = make_audio(t=6.0, rate=44100, channels=2)  # 3x the tiny 2 s chunk
-    stems_payload, _, _, info_json = nodes.RoformerSeparate().separate(wrapper, audio, 2)
+    stems_payload, _, _, info_json = nodes.RoformerSeparate.execute(wrapper, audio, 2).args
     assert json.loads(info_json)["chunk_seconds"] == 2
     for wave in stems_payload["stems"].values():
         assert wave.shape[1] == 264600  # exact length in and out
@@ -99,37 +114,82 @@ def test_separate_chunk_override(nodes, models_dir, tiny_model, make_audio):
 
 
 def test_to_audio_and_info(nodes, models_dir, tiny_model, make_audio):
-    wrapper, = nodes.RoformerLoader().load("tiny", "cpu")
-    stems_payload, _, _, _ = nodes.RoformerSeparate().separate(wrapper, make_audio(t=1.0), 0)
-    (audio,) = nodes.RoformerToAudio().to_audio(stems_payload, "other")
+    wrapper, stems_text = nodes.RoformerLoader.execute("tiny", "cpu").args
+    stems_payload, _, _, _ = nodes.RoformerSeparate.execute(wrapper, make_audio(t=1.0), 0).args
+    (audio,) = nodes.RoformerToAudio.execute(stems_payload, "other").args
     assert audio["waveform"].shape[0] == 1 and audio["sample_rate"] == 44100
-    (fallback,) = nodes.RoformerToAudio().to_audio(stems_payload, "no-such-stem")
+    # the dropdown default and a name the payload does not have both fall back to the first
+    # stem, so a stale choice can never fail a run; matching is case-insensitive
+    (auto,) = nodes.RoformerToAudio.execute(stems_payload, nodes.AUTO_STEM).args
+    (fallback,) = nodes.RoformerToAudio.execute(stems_payload, "no-such-stem").args
+    (upper,) = nodes.RoformerToAudio.execute(stems_payload, "OTHER").args
+    assert torch.equal(upper["waveform"][0], stems_payload["stems"]["other"])
+    assert torch.equal(auto["waveform"][0], stems_payload["stems"]["vocals"])
     assert torch.equal(fallback["waveform"][0], stems_payload["stems"]["vocals"])
-    (text,) = nodes.RoformerInfo().info(stems_payload)
+    (text,) = nodes.RoformerInfo.execute(stems_payload).args
     assert json.loads(text)["stems"] == ["vocals", "other"]
 
 
+def test_to_audio_dropdown(nodes):
+    """Roformer To Audio: a dropdown seeded with every known stem name; Custom: free text."""
+    stem = next(i for i in nodes.RoformerToAudio.define_schema().inputs if i.id == "stem")
+    assert isinstance(stem, nodes.io.Combo.Input)
+    assert stem.default == nodes.AUTO_STEM == stem.options[0]
+    assert set(nodes.ALL_STEMS) <= set(stem.options) and len(stem.options) == len(set(stem.options))
+
+    custom = next(i for i in nodes.CustomRoformerToAudio.define_schema().inputs if i.id == "stem")
+    assert isinstance(custom, nodes.io.String.Input) and custom.default == ""
+
+
+def test_stem_names_cover_the_manifest(manifest, stem_names):
+    """The static map: one entry per curated checkpoint, canonical (lower case, aliases
+    merged) unique names in dropdown order - priority first, vocals at the top of every
+    list that has it, and no case-duplicates anywhere (vocals, not vocals and Vocals)."""
+    stems = stem_names.MODEL_STEMS
+    assert set(stems) == {m.id for m in manifest}
+    for mid, names in stems.items():
+        assert isinstance(names, tuple) and len(names) >= 2, mid
+        assert len(names) == len(set(names)) and all(isinstance(n, str) and n for n in names), mid
+        assert all(n == stem_names.canonical(n) for n in names), mid
+        assert list(names) == stem_names.sort_stems(names), mid  # stored in dropdown order
+        if "vocals" in names:
+            assert names[0] == "vocals", mid
+    all_names = {n for names in stems.values() for n in names}
+    assert set(stem_names.ALL_STEMS) == all_names
+    assert list(stem_names.ALL_STEMS) == stem_names.sort_stems(all_names)
+
+
+def test_pick_stem_case_and_alias(nodes):
+    """The dropdown is canonical lower case; a payload may use any spelling or capitalisation."""
+    a = torch.arange(320).reshape(2, 160).float()
+    b = a + 1000.0
+    payload = {"stems": {"Vocals": a, "Instrumental": b}, "sample_rate": 44100}
+    (vocals,) = nodes.RoformerToAudio.execute(payload, "vocals").args             # lower-case option
+    (inst,) = nodes.CustomRoformerToAudio.execute(payload, "instrument").args     # alias for Instrumental
+    (inst2,) = nodes.RoformerToAudio.execute(payload, "INSTRUMENTAL").args        # case-insensitive too
+    assert torch.equal(vocals["waveform"][0], a)
+    assert torch.equal(inst["waveform"][0], b) and torch.equal(inst2["waveform"][0], b)
+
+
 def test_save_audio(nodes, output_dir, models_dir, tiny_model, make_audio):
-    wrapper, = nodes.RoformerLoader().load("tiny", "cpu")
-    stems_payload, _, _, _ = nodes.RoformerSeparate().separate(wrapper, make_audio(t=1.0), 0)
-    result = nodes.RoformerSaveAudio().save(stems_payload, "unit/stems", "", "wav")
-    assert result == ()  # no outputs, no preview: the node just writes the files
+    wrapper, stems_text = nodes.RoformerLoader.execute("tiny", "cpu").args
+    stems_payload, _, _, _ = nodes.RoformerSeparate.execute(wrapper, make_audio(t=1.0), 0).args
+    result = nodes.RoformerSaveAudio.execute(stems_payload, "unit/stems", "wav")
+    assert result.args == ()  # no outputs, no preview: the node just writes the files
     files = sorted((output_dir / "unit").glob("stems_*.wav"))
     names = {f.stem.split("_")[-1] for f in files}
-    assert names == {"vocals", "other"}
+    assert names == {"vocals", "other"}  # every stem in the payload is saved
     import soundfile as sf
     data, rate = sf.read(str(files[0]))
     assert rate == 44100 and data.shape == (44100, 2)
-    # a single named stem writes one more file; saves never overwrite each other
-    nodes.RoformerSaveAudio().save(stems_payload, "unit/stems", "vocals", "wav")
-    assert len(list((output_dir / "unit").glob("stems_*.wav"))) == 3
-    with pytest.raises(ValueError):
-        nodes.RoformerSaveAudio().save(stems_payload, "unit/stems", "nope", "wav")
+    # a second run writes more files; saves never overwrite each other
+    nodes.RoformerSaveAudio.execute(stems_payload, "unit/stems", "wav")
+    assert len(list((output_dir / "unit").glob("stems_*.wav"))) == 4
 
 
 def test_unknown_model_raises(nodes, models_dir):
     with pytest.raises(FileNotFoundError, match="not found"):
-        nodes.RoformerLoader().load("no-such-model", "cpu")
+        nodes.RoformerLoader.execute("no-such-model", "cpu")
 
 
 def test_unsupported_model_refused(nodes, models_dir):
@@ -145,7 +205,7 @@ def test_unsupported_model_refused(nodes, models_dir):
     loading_mod.BY_ID = {**orig, "fake-refused": fake}
     try:
         with pytest.raises(ValueError, match="not supported"):
-            nodes.RoformerLoader().load("fake-refused", "cpu")
+            nodes.RoformerLoader.execute("fake-refused", "cpu")
     finally:
         loading_mod.BY_ID = orig
 
@@ -174,13 +234,12 @@ def test_manifest_families(nodes):
 
 
 def test_stems_payload_contract(nodes, tiny_model, make_audio):
-    """The stems payload shape other packs rely on - ComfyUI-Dettato's Transcribe accepts it
-    directly: {'stems': {name: (channels, N) tensor at the file's own rate}, 'sample_rate',
-    'info'}."""
-    wrapper, = nodes.RoformerLoader().load("tiny", "cpu")
-    payload, target, other, info_json = nodes.RoformerSeparate().separate(
+    """The stems payload shape the To Audio / Save Audio nodes consume:
+    {'stems': {name: (channels, N) tensor at the file's own rate}, 'sample_rate', 'info'}."""
+    wrapper, stems_text = nodes.RoformerLoader.execute("tiny", "cpu").args
+    payload, target, other, info_json = nodes.RoformerSeparate.execute(
         wrapper, make_audio(t=0.2, rate=48000, freq=440.0), 0
-    )
+    ).args
     assert set(payload) == {"stems", "sample_rate", "info"}
     assert payload["sample_rate"] == 48000  # the file's own rate, not the model's
     assert list(payload["stems"]) == ["vocals", "other"]
