@@ -13,6 +13,25 @@ ROOT = Path(__file__).resolve().parents[1]
 # generated inputs' values - they are link inputs, never widgets_values
 DYNAMIC_IO = {"COMFY_AUTOGROW_V3", "COMFY_DYNAMICCOMBO_V3", "COMFY_DYNAMICGROUP_V3"}
 
+# widget inputs by io_type: None on the test stub (no io_type attribute), the real V1 type
+# names on the real classes - everything else is a link slot
+WIDGET_IO = {None, "INT", "FLOAT", "BOOLEAN", "COMBO", "STRING", "MULTILINE"}
+
+
+def _link_slots(nodes, cls):
+    """The full ordered link-slot list a pack node's class has: schema inputs in
+    declaration order, autogrow expanded in place to every template name, widgets out.
+    LiteGraph's configure() maps a saved graph's inputs array to the node's slots
+    positionally, so the workflow's inputs array must list every slot, in this order.
+    """
+    slots = []
+    for i in cls.define_schema().inputs:
+        if isinstance(i, nodes.io.Autogrow.Input):
+            slots.extend(i.template.names)
+        elif getattr(i, "io_type", None) not in WIDGET_IO:
+            slots.append(i.id)
+    return slots
+
 
 @pytest.mark.parametrize("workflow", ["roformer_separation", "roformer_ensemble"])
 def test_example_workflow(nodes, workflow):
@@ -45,6 +64,11 @@ def test_example_workflow(nodes, workflow):
         linked = {inp["name"] for inp in node.get("inputs") or []}
         widgets = [name for name in inputs if name not in linked]
         assert len(node["widgets_values"]) == len(widgets), node["type"]
+        # the serialized inputs array is the full slot list in slot order - missing or
+        # reordered slots would shift every later link's slot index on load
+        assert [inp["name"] for inp in node.get("inputs") or []] == _link_slots(nodes, cls), (
+            node["type"], "inputs must list every link slot in declaration order, "
+            "autogrow expanded to all template names")
         for name, value in zip(widgets, node["widgets_values"]):
             options = getattr(inputs[name], "options", None)
             if options is not None:

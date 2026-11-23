@@ -336,6 +336,34 @@
           "name": "audio1",
           "type": "AUDIO",
           "link": 9
+        },
+        {
+          "name": "audio2",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio3",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio4",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio5",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio6",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio7",
+          "type": "AUDIO"
+        },
+        {
+          "name": "mix",
+          "type": "AUDIO"
         }
       ],
       "outputs": [
@@ -383,6 +411,30 @@
           "name": "audio1",
           "type": "AUDIO",
           "link": 11
+        },
+        {
+          "name": "audio2",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio3",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio4",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio5",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio6",
+          "type": "AUDIO"
+        },
+        {
+          "name": "audio7",
+          "type": "AUDIO"
         },
         {
           "name": "mix",
@@ -615,7 +667,7 @@
       2,
       0,
       10,
-      2,
+      8,
       "AUDIO"
     ],
     [

@@ -1,4 +1,4 @@
-from functools import wraps
+import logging
 from packaging import version
 from collections import namedtuple
 
@@ -20,18 +20,10 @@ def exists(val):
 def default(v, d):
     return v if exists(v) else d
 
-def once(fn):
-    called = False
-    @wraps(fn)
-    def inner(x):
-        nonlocal called
-        if called:
-            return
-        called = True
-        return fn(x)
-    return inner
-
-print_once = once(print)
+# vendored from the upstream RoFormer repo, one local change: the upstream prints the
+# attention-backend choice to stdout at model build; here it goes to the logging debug
+# level instead, so ComfyUI's console stays quiet by default (still available at debug)
+_log = logging.getLogger(__name__)
 
 # main class
 
@@ -61,10 +53,10 @@ class Attend(nn.Module):
         device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
 
         if device_properties.major == 8 and device_properties.minor == 0:
-            print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
+            _log.debug('A100 GPU detected: flash attention enabled for cuda tensors.')
             self.cuda_config = FlashAttentionConfig(True, False, False)
         else:
-            print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
+            _log.debug('Non-A100 GPU detected: math or mem efficient attention will be used for cuda tensors.')
             self.cuda_config = FlashAttentionConfig(False, True, True)
 
     def flash_attn(self, q, k, v):

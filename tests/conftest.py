@@ -143,8 +143,14 @@ def _install_comfy_api_stub() -> None:
 
     class _Audio:
         io_type = "AUDIO"
-        Input = _Base
-        Output = _Base
+
+        class Input(_Base):
+            # a proper class with the real io_type (the real Audio.Input is not a bare
+            # _Base stand-in): the tests classify link vs widget inputs by io_type
+            io_type = "AUDIO"
+
+        class Output(_Base):
+            io_type = "AUDIO"
 
     class _Boolean:
         class Input(_Base):
