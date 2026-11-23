@@ -48,17 +48,27 @@ All nodes are in the `audio/Roformer` category.
   curated list. The first entry, `sw-6stem`, is the default. Checkpoints download
   automatically on first use; a corrupt download is detected and the error tells you to
   delete the model folder and retry.
-- `device` — `auto` (ComfyUI's device), `cuda`, `mps`, `cpu`.
+- `device` — `auto` (ComfyUI's session device policy for auxiliary models: honors
+  `--gpu-only` and falls back to the CPU on machines without usable VRAM), `cuda`, `mps`,
+  `cpu`.
+
+The weights ride in system RAM and occupy the GPU only while a separation is running —
+ComfyUI's model management evicts them when other nodes need the VRAM, so the loader
+composes with any other model in the graph.
+
 - Outputs: the model payload, and `stems` — the model's stem names as text, in the order the
   model trained them in; preview with any text display or wire it where you like.
 
 ### Roformer Separate
-Runs the loaded model on ComfyUI `AUDIO` (from **Load Audio**, or the audio track of a
-loaded video) at any sample rate — the input is resampled to 44.1 kHz and matched to the
-model's trained channel count automatically.
-- `chunk_seconds` — `0` (default) uses the model's own window (about 11–22 s); set a
-  positive value to use less VRAM. Longer audio is processed in overlapping windows with a
-  crossfade, so the output is exactly the length of the input.
+Runs the loaded model on the audio input — any sample rate (resampled internally to 44.1
+kHz) and any channel count (downmixed / upmixed to the model's trained count).
+- `model` — from the Loader.
+- `audio` — the mix to separate (from **Load Audio**, or the audio track of a loaded video).
+- `chunk_seconds` — `0` (default) uses the model's own training window (about 11–22 s);
+  set a positive value to use less VRAM. Longer audio is processed in overlapping windows
+  with a crossfade, so the output is exactly the length of the input. If a window runs out
+  of GPU memory the node halves it and retries (up to three times, logged) before raising
+  an actionable error.
 - Outputs (at the file's own sample rate):
   - `stems` — all stems, for To Audio / Save Audio below.
   - `target` / `other` — the model's target stem and the other stem as ready `AUDIO`
@@ -82,8 +92,13 @@ the name from `info_json`, matched case-insensitively (empty = the target stem).
 local models and custom checkpoints whose stem names are not in the standard list.
 
 ### Roformer Save Audio
-Writes the stems to ComfyUI's output folder as `<prefix>_XXXXX_<stem>.wav` / `.flac`
-(lossless), numbered so runs never overwrite each other. Every stem in the payload is saved.
+Writes every stem in the payload to ComfyUI's output folder, numbered so runs never
+overwrite each other; the saved files are linked on the node (the audio icon).
+- `stems` — the stems payload from Separate.
+- `filename_prefix` — the output file name (without extension; subfolders allowed).
+- `format` — `wav` (lossless float32, what the audio nodes work with) or `flac` (lossless,
+  smaller, written through the native ComfyUI audio saver so the workflow prompt is embedded
+  in the file metadata).
 
 ### Roformer Info
 The separation summary as a JSON string, for branching or saving run metadata.
@@ -170,18 +185,13 @@ Single-task fine-tunes the generic separators don't cover.
 Stem names come from each model's training config, so the list above is exactly what you
 get — for the multi-stem models pick any of the stems with Roformer To Audio.
 
-## Notes
+## Tests
 
-**Quality.** Every model is built strictly from its own config file and must match it
-exactly, so an incompatible or corrupt checkpoint fails loudly at load time instead of
-silently predicting garbage. All 41 checkpoints were verified against their actual weights
-on 2026-11-21, including real separation runs; if one still fails for you, report the
-error — it identifies the checkpoint and the cause.
-
-**Performance.** A 4-minute song takes roughly 30–60 s on an RTX 4090 for the ~250 MB
-models; the 1.5–1.7 GB mel-band models want at least 10 GB of VRAM and are several times
-slower. CPU works but expect minute-scale processing. `chunk_seconds` trades a little
-quality for VRAM.
+- `pytest tests` — the unit suite: no weights, no ComfyUI install, no network (CPU, seconds).
+- `RUN_RF_WEIGHTS=1 pytest tests` — the integration suite: downloads the real `sw-6stem`
+  and `melband-small` checkpoints once and runs the nodes end to end (separation, the
+  stems-decompose-the-mix guarantee, both save formats, stem extraction) on ComfyUI's own
+  device selection.
 
 **Licensing.** Code: see `LICENSE`. Checkpoints: each Hugging Face repo carries its own license/terms —
 at least two (Revive, Resurrection) have open commercial-use permission threads, so check

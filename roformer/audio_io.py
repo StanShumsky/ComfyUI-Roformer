@@ -9,7 +9,14 @@ def audio_to_tensor(audio: dict) -> tuple[torch.Tensor, int]:
     waveform = audio["waveform"]
     if not torch.is_tensor(waveform):
         waveform = torch.as_tensor(waveform)
-    rate = int(audio["sample_rate"])
+    rate = audio.get("sample_rate")
+    if rate is None:
+        raise ValueError(
+            "The audio input has no sample rate - a decoder that could not read it (PyAV leaves "
+            "codec_context.sample_rate None on some files). Re-encode the file (e.g. ffmpeg) or use "
+            "a different source node."
+        )
+    rate = int(rate)
     if rate <= 0:
         raise ValueError(f"Audio sample rate must be positive, got {rate}.")
     x = waveform.detach().float()

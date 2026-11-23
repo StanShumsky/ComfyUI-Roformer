@@ -31,6 +31,25 @@ def test_node_schemas(nodes):
     assert len(categories) == 1  # one menu category for the whole pack
 
 
+def test_tooltips_and_aliases(nodes):
+    """V3 UX baseline (the native geometry packs): hover text on every widget input, search
+    aliases on every node but the loader, is_output_node on exactly the save node."""
+    widget_types = {"FLOAT", "RANGEFLOAT", "INT", "BOOLEAN", "COMBO", "STRING", "AUDIO",
+                    "IMAGE", "MASK", "AUTOGROW"}
+    for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+        schema = cls.define_schema()
+        for inp in schema.inputs:
+            io_type = getattr(type(inp), "io_type", None)
+            if io_type is not None and io_type not in widget_types:
+                continue  # a link input: the hover text travels with the producer's output
+            assert inp.tooltip, (name, inp.id)
+        if name.endswith("Loader"):
+            continue
+        assert schema.search_aliases, name
+    assert {n for n, c in nodes.NODE_CLASS_MAPPINGS.items()
+            if c.define_schema().is_output_node} == {"RoformerSaveAudio"}
+
+
 def test_v3_entrypoint_lists_all_nodes(nodes):
     import asyncio
 

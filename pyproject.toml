@@ -1,13 +1,26 @@
 [project]
 name = "comfyui-roformer"
 description = "Music source separation nodes for 41 popular RoFormer checkpoints on Hugging Face (the 13 pcunwa releases plus community releases): custom loader, chunked inference, stem extraction and saving."
-version = "0.2.0"
+version = "0.3.0"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
-dependencies = ["huggingface_hub>=0.24", "soundfile", "soxr", "PyYAML", "rotary-embedding-torch", "einops", "beartype", "librosa", "packaging"]
+dependencies = [
+    "huggingface_hub>=0.24",
+    "soundfile",
+    "soxr",
+    "PyYAML",
+    "rotary-embedding-torch",
+    "einops",
+    "beartype",
+    "librosa",
+    "packaging",
+    # FNO1d mask estimator for the BS-Roformer-Inst-FNO checkpoint (version it was trained with)
+    "neuraloperator==1.0.2",
+]
+# No GPU classifier: the nodes run on whatever accelerator ComfyUI runs on (including CPU).
+# A declared GPU would make ComfyUI-Manager report a platform conflict on CPU setups.
 classifiers = [
     "Operating System :: OS Independent",
-    "Environment :: GPU :: NVIDIA CUDA",
-    "Environment :: GPU :: Apple Metal",
 ]
 
 [project.urls]
@@ -17,7 +30,16 @@ Repository = "https://github.com/StanShumsky/ComfyUI-Roformer"
 PublisherId = "shumsky"
 DisplayName = "ComfyUI-Roformer"
 Icon = "https://raw.githubusercontent.com/StanShumsky/ComfyUI-Roformer/main/icon.png"
+# V3 nodes (comfy_api.latest) need >=0.3.48; the search_aliases field >=0.11.0;
+# the newest of the two is the real floor.
+requires-comfyui = ">=0.11.0"
+
+# No [[tool.comfy.Models]] on purpose: the in-node subfolders are manifest ids ("sw-6stem",
+# "melband-small", ...) that repo-name-based registry installs cannot reproduce, and all 41
+# checkpoints auto-download in-node anyway.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# importlib mode: prepend mode imports the repo-root __init__.py as a test module.
 addopts = "--import-mode=importlib"
+markers = ["integration: loads real weights; opt in with RUN_RF_WEIGHTS=1"]

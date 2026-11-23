@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import torch
 
+import comfy.model_management as mm
 from comfy.utils import ProgressBar
 
 from .chunking import run_chunked
@@ -17,6 +18,15 @@ from .chunking import run_chunked
 class Separator:
     def __init__(self, payload: dict):
         self.p = payload
+
+    @staticmethod
+    def chunk_plan(total: int, chunk: int) -> tuple[int, int, int]:
+        """(chunk, hop, n_chunks) for a total of `total` samples at a `chunk`-sample window;
+        the node uses it to size the progress bars before the run."""
+        chunk = max(chunk, 1024)
+        hop = max(1, int(chunk * 0.75))
+        n_chunks = 1 if total <= chunk else max(1, (total - chunk) // hop + 1)
+        return chunk, hop, n_chunks
 
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (C, T) at the model rate -> (stems, C, T) (stems >= 1)."""
@@ -30,22 +40,26 @@ class Separator:
         raise ValueError(f"Unexpected model output shape {tuple(y.shape)}")
 
     @torch.inference_mode()
-    def run(self, x44: torch.Tensor, chunk_seconds: int, progress: ProgressBar | None = None) -> dict[str, torch.Tensor]:
-        """x44: (C, T) float32 at the model's sample rate -> {stem name: (C, T) cpu float32}."""
+    def run(self, x44: torch.Tensor, chunk_seconds: int, progress: ProgressBar | None = None,
+            tqdm_bar=None, chunk: int | None = None) -> dict[str, torch.Tensor]:
+        """x44: (C, T) float32 at the model's sample rate -> {stem name: (C, T) cpu float32}.
+        `chunk` overrides the window (the OOM retry path halves it); `chunk_seconds` sets it
+        when no override is given (0 = the model's own training window)."""
         p = self.p
-        chunk = p["chunk_size"] if chunk_seconds <= 0 else int(chunk_seconds * p["sample_rate"])
-        chunk = max(chunk, 1024)
-        hop = max(1, int(chunk * 0.75))
+        if chunk is None:
+            chunk = p["chunk_size"] if chunk_seconds <= 0 else int(chunk_seconds * p["sample_rate"])
+        chunk, hop, n_chunks = self.chunk_plan(x44.shape[-1], chunk)
         device = p["device"]
         xdev = x44.to(device=device, dtype=torch.float32)
 
-        n_chunks = 1 if x44.shape[-1] <= chunk else max(1, (x44.shape[-1] - chunk) // hop + 1)
         if progress is None:
             progress = ProgressBar(n_chunks + 1)
 
         def work(seg: torch.Tensor) -> torch.Tensor:
             y = self._forward(seg)
             progress.update(1)
+            if tqdm_bar is not None:
+                tqdm_bar.update(1)
             return y
 
         tail_pad = int(p["cfg"].get("model", {}).get("stft_win_length", 2048))
@@ -66,7 +80,8 @@ class Separator:
             if rest:
                 stems[rest[0]] = xdev - sum(stems.values())
         del xdev
-        if str(device).startswith("cuda"):
-            torch.cuda.empty_cache()
+        mm.soft_empty_cache()
         progress.update(1)
+        if tqdm_bar is not None:
+            tqdm_bar.update(1)
         return {k: v.cpu().contiguous() for k, v in stems.items()}

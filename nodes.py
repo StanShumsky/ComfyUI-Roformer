@@ -18,11 +18,12 @@ from pathlib import Path
 
 import torch
 import soundfile as sf
+from tqdm.auto import tqdm
 
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import ProgressBar
-from comfy_api.latest import io
+from comfy_api.latest import io, UI
 
 from .roformer.audio_io import audio_to_tensor, resample, to_audio_payload
 from .roformer.loading import load_roformer, local_models
@@ -35,6 +36,22 @@ LOGGER = logging.getLogger(__name__)
 CATEGORY = "audio/Roformer"
 ROFORMER_MODEL = io.Custom("ROFORMER_MODEL")
 ROFORMER_STEMS = io.Custom("ROFORMER_STEMS")
+
+
+def _all_on_device(module, device) -> bool:
+    """True when every parameter and buffer of ``module`` sits on ``device``."""
+    device = torch.device(device)
+    for t in list(module.parameters()) + list(module.buffers()):
+        if t.device != device:
+            return False
+    return True
+
+
+def _is_oom(exc: BaseException) -> bool:
+    """A CUDA OOM, or the RuntimeError wording MPS/XPU use for the same event."""
+    return isinstance(exc, torch.OutOfMemoryError) or (
+        isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+    )
 
 
 def _model_choices() -> list[str]:
@@ -74,7 +91,12 @@ class RoformerLoader(io.ComfyNode):
                                tooltip="A checkpoint id (auto-downloaded into models/roformer on first use) "
                                        "or a folder name in that directory holding the .ckpt/.pth plus its "
                                        "config YAML."),
-                io.Combo.Input("device", options=["auto", "cuda", "mps", "cpu"], default="auto"),
+                io.Combo.Input("device", options=["auto", "cuda", "mps", "cpu"], default="auto",
+                               tooltip="Where the model runs: auto = ComfyUI's session device policy for "
+                                       "auxiliary models (honors --gpu-only and a no-VRAM session); the "
+                                       "others pin the run device. Weights wait in system RAM until a "
+                                       "separation runs, then move to the device and are evicted again when "
+                                       "other models need the VRAM."),
             ],
             outputs=[
                 ROFORMER_MODEL.Output(id="model", display_name="model"),
@@ -86,10 +108,9 @@ class RoformerLoader(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: str, device: str) -> io.NodeOutput:
-        torch_device = mm.get_torch_device() if device == "auto" else torch.device(device)
-        payload = load_roformer(model, torch_device)
-        LOGGER.info("Roformer: loaded %s from %s in fp32 on %s.",
-                    payload["label"], payload["ckpt_path"], torch_device)
+        payload = load_roformer(model, device)
+        LOGGER.info("Roformer: loaded %s from %s (load %s, offload %s).",
+                    payload["label"], payload["ckpt_path"], payload["device"], payload["offload_device"])
         return io.NodeOutput(payload, ", ".join(payload["stems"]))
 
 
@@ -102,6 +123,7 @@ class RoformerSeparate(io.ComfyNode):
             node_id="RoformerSeparate",
             display_name="Roformer Separate",
             category=CATEGORY,
+            search_aliases=["separate", "separation", "stems", "source separation"],
             description=(
                 "Separate the audio with the loaded model. The input is resampled to the model's "
                 "44.1 kHz (stereo, or downmixed / upmixed to the model's trained channel count) and "
@@ -115,10 +137,15 @@ class RoformerSeparate(io.ComfyNode):
             ),
             inputs=[
                 ROFORMER_MODEL.Input("model"),
-                io.Audio.Input("audio"),
+                io.Audio.Input("audio",
+                               tooltip="The mix to separate, any sample rate (resampled internally to the "
+                                       "model's 44.1 kHz) and any channel count (downmixed / upmixed to the "
+                                       "model's trained count)."),
                 io.Int.Input("chunk_seconds", default=0, min=0, max=240,
                              tooltip="0 = the model's own training window from its config (recommended); a "
-                                     "positive value caps the window for low-VRAM machines."),
+                                     "positive value caps the window for low-VRAM machines. If a window "
+                                     "runs out of GPU memory the node halves it and retries (up to three "
+                                     "times, logged)."),
             ],
             outputs=[
                 ROFORMER_STEMS.Output(id="stems", display_name="stems"),
@@ -137,8 +164,64 @@ class RoformerSeparate(io.ComfyNode):
         elif p["num_channels"] == 2 and x.shape[0] == 1:
             x = x.repeat(2, 1)
         x44 = resample(x, rate, p["sample_rate"])
-        progress = ProgressBar(1)
-        stems44 = Separator(p).run(x44, chunk_seconds, progress)
+        # Load the model onto the run device (ComfyUI's model management evicts it again when
+        # other nodes need the VRAM) and complete a partial load.
+        patcher = p["patcher"]
+        mm.load_model_gpu(patcher)
+        device = patcher.load_device
+        net = p["net"]
+        if device.type != "cpu" and not _all_on_device(net, device):
+            # The load was partial: model management's low-VRAM streaming only covers
+            # ComfyUI's own ops, so under pressure the first forward would see weights
+            # split across the offload device and the GPU and crash. Complete the move;
+            # if the device cannot take the whole model, run on the CPU instead of
+            # OOMing the workflow.
+            try:
+                net.to(device)
+                patcher.model.model_loaded_weight_memory = patcher.model_size()
+            except RuntimeError as exc:
+                if not _is_oom(exc):
+                    raise
+                LOGGER.warning(
+                    "Roformer: the model does not fit in the free VRAM on %s; "
+                    "running this separation on the CPU instead.", device,
+                )
+                net.to(torch.device("cpu"), dtype=torch.float32)
+                net.device = torch.device("cpu")  # the patcher's bookkeeping for the model's device
+                patcher.model.model_loaded_weight_memory = 0
+                patcher.size = 0
+                device = torch.device("cpu")
+        p["device"] = device
+        # The window: the model's training window (or the cap), halved on each OOM retry.
+        chunk = p["chunk_size"] if chunk_seconds <= 0 else int(chunk_seconds * p["sample_rate"])
+        chunk = max(chunk, 1024)
+        min_chunk = max(1024, int(p["sample_rate"]))  # one second: below this, separation degrades
+        rate44 = p["sample_rate"]
+        attempts = 0
+        while True:
+            _, _, n_chunks = Separator.chunk_plan(x44.shape[-1], chunk)
+            progress = ProgressBar(n_chunks + 1)
+            with tqdm(total=n_chunks + 1, desc="Roformer separation") as tq:
+                try:
+                    stems44 = Separator(p).run(x44, chunk_seconds, progress=progress, tqdm_bar=tq,
+                                               chunk=chunk)
+                    break
+                except (torch.OutOfMemoryError, RuntimeError) as exc:
+                    if not _is_oom(exc):  # non-OOM errors pass through untouched
+                        raise
+                    if attempts >= 3 or chunk <= min_chunk:
+                        raise ValueError(
+                            f"Roformer: out of GPU memory separating even at a "
+                            f"{chunk / rate44:.1f} s window on {device}. Cap chunk_seconds lower, "
+                            "use a smaller model, or set the loader's device to cpu."
+                        ) from exc
+                    attempts += 1
+                    LOGGER.warning(
+                        "Roformer: out of memory at a %.1f s window; retrying at %.1f s.",
+                        chunk / rate44, chunk / 2 / rate44,
+                    )
+                    chunk = max(min_chunk, chunk // 2)
+                    mm.soft_empty_cache()
         stems = {k: resample(v, p["sample_rate"], rate) for k, v in stems44.items()}
         mm.soft_empty_cache()
 
@@ -194,6 +277,7 @@ class RoformerToAudio(io.ComfyNode):
             node_id="RoformerToAudio",
             display_name="Roformer To Audio",
             category=CATEGORY,
+            search_aliases=["stem", "extract stem", "to audio"],
             description=(
                 "Extract one stem from a stems payload as an AUDIO you can feed anywhere else "
                 "(preview, save, or another separator). stem: pick from the dropdown - every stem "
@@ -204,9 +288,13 @@ class RoformerToAudio(io.ComfyNode):
             ),
             inputs=[
                 ROFORMER_STEMS.Input("stems"),
-                io.Combo.Input("stem", options=[AUTO_STEM] + list(ALL_STEMS), default=AUTO_STEM),
+                io.Combo.Input("stem", options=[AUTO_STEM] + list(ALL_STEMS), default=AUTO_STEM,
+                               tooltip="The stem to extract (case-insensitive; the model's own list is "
+                                       "on the Loader's stems output). (auto) = the first stem, i.e. the "
+                                       "model's target. For a name outside the list (a local model, a "
+                                       "custom checkpoint) use Custom Roformer To Audio."),
             ],
-            outputs=[io.Audio.Output(id="audio", display_name="audio")],
+            outputs=[io.Audio.Output(id="audio", display_name="audio")]
         )
 
     @classmethod
@@ -224,6 +312,7 @@ class CustomRoformerToAudio(RoformerToAudio):
             node_id="CustomRoformerToAudio",
             display_name="Custom Roformer To Audio",
             category=CATEGORY,
+            search_aliases=["custom stem", "extract custom stem"],
             description=(
                 "Like Roformer To Audio, but the stem is typed by hand instead of picked from the "
                 "dropdown: the name from info_json, matched case-insensitively (empty = the first "
@@ -232,9 +321,11 @@ class CustomRoformerToAudio(RoformerToAudio):
             ),
             inputs=[
                 ROFORMER_STEMS.Input("stems"),
-                io.String.Input("stem", default=""),
+                io.String.Input("stem", default="",
+                                tooltip="The stem name typed by hand (case-insensitive); empty = the "
+                                        "first stem, i.e. the model's target."),
             ],
-            outputs=[io.Audio.Output(id="audio", display_name="audio")],
+            outputs=[io.Audio.Output(id="audio", display_name="audio")]
         )
 
 
@@ -247,16 +338,26 @@ class RoformerSaveAudio(io.ComfyNode):
             node_id="RoformerSaveAudio",
             display_name="Roformer Save Audio",
             category=CATEGORY,
+            search_aliases=["save stems", "export stems", "save audio"],
             is_output_node=True,
             description=(
-                "Write the stems to ComfyUI's output folder as <prefix>_XXXXX_<stem>.<format> "
-                "(float32 WAV or FLAC, both lossless), numbered so runs never overwrite each other."
+                "Write the stems to ComfyUI's output folder, numbered so runs never overwrite "
+                "each other: WAV as <prefix>_XXXXX_<stem>.wav (lossless float32), FLAC through the "
+                "native ComfyUI audio saver as <prefix>/<stem>_XXXXX.flac (lossless, with the "
+                "workflow prompt embedded in the file metadata). The saved files are linked on the "
+                "node (the audio icon)."
             ),
             inputs=[
                 ROFORMER_STEMS.Input("stems"),
-                io.String.Input("filename_prefix", default="roformer/stem"),
-                io.Combo.Input("format", options=["wav", "flac"], default="wav"),
+                io.String.Input("filename_prefix", default="roformer/stem",
+                                tooltip="The output file name (without extension, subfolders allowed); "
+                                        "runs are numbered so they never overwrite each other."),
+                io.Combo.Input("format", options=["wav", "flac"], default="wav",
+                               tooltip="wav = lossless float32 (what the audio nodes work with); flac = "
+                                       "lossless 16-bit, smaller, and carries the workflow prompt in the "
+                                       "file metadata."),
             ],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             outputs=[],
         )
 
@@ -266,16 +367,33 @@ class RoformerSaveAudio(io.ComfyNode):
             filename_prefix, folder_paths.get_output_directory(), 1, 1
         )
         # get_save_image_path counts PNGs only; count our own format to avoid overwrites.
-        counter = len(list(Path(folder).glob(f"{filename}_*.{format}")))
+        counter = len(list(Path(folder).glob(f"{filename}_*.wav")))
         rate = stems["sample_rate"]
+        results = []
         for name, wave in stems["stems"].items():
             safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-            path = Path(folder) / f"{filename}_{counter:05d}_{safe}.{format}"
-            sf.write(str(path), wave.cpu().numpy().T, rate,  # (N, C) for soundfile
-                     subtype="FLOAT" if format == "wav" else None)
-            counter += 1
-            LOGGER.info("Roformer: wrote %s", path)
-        return io.NodeOutput()  # an output node returns no values
+            if format == "flac":
+                # the native FLAC path: the helper embeds the workflow prompt in the file
+                # metadata (from the hidden inputs the engine injects into cls.hidden) and
+                # hands back the saved-file descriptors the node UI links to
+                saved = UI.AudioSaveHelper.save_audio(
+                    {"waveform": wave.float().cpu()[None], "sample_rate": rate},
+                    filename_prefix=f"{filename_prefix}/{safe}",
+                    folder_type=io.FolderType.output, cls=cls, format="flac",
+                )
+                results.extend(saved)
+                for s in saved:
+                    LOGGER.info("Roformer: wrote %s/%s",
+                                s.get("subfolder", ""), s.get("filename", ""))
+            else:
+                path = Path(folder) / f"{filename}_{counter:05d}_{safe}.wav"
+                sf.write(str(path), wave.cpu().numpy().T, rate,  # (N, C) for soundfile
+                         subtype="FLOAT")
+                results.append(UI.SavedResult(
+                    filename=path.name, subfolder=subfolder, type=io.FolderType.output))
+                LOGGER.info("Roformer: wrote %s", path)
+                counter += 1
+        return io.NodeOutput(ui=UI.SavedAudios(results))
 
 
 class RoformerInfo(io.ComfyNode):
@@ -287,6 +405,7 @@ class RoformerInfo(io.ComfyNode):
             node_id="RoformerInfo",
             display_name="Roformer Info",
             category=CATEGORY,
+            search_aliases=["info", "summary"],
             description="The separation summary as JSON (model, stems, lengths, rates, chunking).",
             inputs=[ROFORMER_STEMS.Input("stems")],
             outputs=[io.String.Output(id="info_json", display_name="info_json")],

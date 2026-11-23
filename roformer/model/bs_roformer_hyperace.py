@@ -21,7 +21,7 @@ from einops import rearrange, pack, unpack
 from einops.layers.torch import Rearrange
 try:
     import torchaudio  # present in the training env; unused at inference
-except ImportError:
+except Exception:  # noqa: BLE001 - never imported for inference; any broken install is neutralised
     torchaudio = None
 # helper functions
 

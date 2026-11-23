@@ -14,6 +14,8 @@ import torch
 import yaml
 
 import folder_paths
+import comfy.model_management as mm
+import comfy.model_patcher
 
 from .manifest import BY_ID, Checkpoint, is_known_id
 from .model import (
@@ -190,8 +192,30 @@ def apply_family_defaults(cls, mcfg: dict, state: dict, ckpt_name: str) -> dict:
     return kwargs
 
 
-def load_roformer(ckpt_ref: str, device: torch.device) -> dict:
-    """Build one model payload: verified weights, its config, stem names and chunk geometry."""
+def _resolve_load_device(device: str) -> torch.device:
+    """An explicit run device, always with an index: a bare 'cuda'/'mps' has .index == None,
+    and ComfyUI's model management (the VBAR pageout path, used when a model loads under
+    VRAM pressure) does int(device.index) - a None index is the "int() argument must be a
+    string, a bytes-like object or a real number, not 'NoneType'" crash."""
+    if device == "cuda":
+        return torch.device(f"cuda:{mm.get_torch_device().index or 0}")
+    if device == "mps":
+        return torch.device("mps:0")
+    return torch.device(device)
+
+
+def load_roformer(ckpt_ref: str, device: str) -> dict:
+    """Build one model payload: verified weights in system RAM, its config, stem names and
+    chunk geometry. The weights ride on the offload device until the Separate node's run
+    loads them onto the GPU (ComfyUI's model management evicts them again on demand)."""
+    if device == "auto":
+        # The native ComfyUI device policy for auxiliary models: honors --gpu-only and the
+        # session VRAM state (a NO_VRAM session runs the model on the CPU).
+        load_device = mm.text_encoder_device()
+        offload_device = mm.text_encoder_offload_device()
+    else:
+        load_device = _resolve_load_device(device)
+        offload_device = torch.device("cpu")
     ckpt_path, config_path, model = _locate(ckpt_ref)
     if config_path is None or not config_path.is_file():
         raise FileNotFoundError(
@@ -211,10 +235,15 @@ def load_roformer(ckpt_ref: str, device: torch.device) -> dict:
         cls = MelBandRoformer if "num_bands" in mcfg else BSRoformer
 
     kwargs = apply_family_defaults(cls, mcfg, state, ckpt_path.name)
+    # Build the weights in system RAM (the state dict is already CPU-resident); no GPU copy
+    # exists until a run asks for it.
     net = cls(**kwargs)
     net.load_state_dict(state, strict=True)  # hard fail: no silent partial loads
     net.eval()
-    net.to(device)
+    # Hand the weights to ComfyUI's model management (the native pattern for auxiliary
+    # models): the model rides on the offload device until a run loads it onto the GPU,
+    # and is evicted again when other nodes need the VRAM.
+    patcher = comfy.model_patcher.CoreModelPatcher(net, load_device, offload_device)
 
     instruments = [str(s) for s in cfg.get("training", {}).get("instruments", ["target", "other"])]
     target = cfg.get("training", {}).get("target_instrument")
@@ -225,7 +254,9 @@ def load_roformer(ckpt_ref: str, device: torch.device) -> dict:
     audio = cfg["audio"]
     return {
         "net": net,
-        "device": device,
+        "patcher": patcher,
+        "device": load_device,
+        "offload_device": offload_device,
         "id": model.id if model is not None else ckpt_ref,
         "label": model.label if model is not None else f"{ckpt_ref} (local)",
         "family": model.family if model is not None else ("melband" if "num_bands" in mcfg else "bs"),
