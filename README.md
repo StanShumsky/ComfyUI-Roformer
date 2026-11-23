@@ -4,7 +4,9 @@ ComfyUI nodes for 41 of the popular RoFormer music source-separation models: 6-s
 4-stem separators, specialists (karaoke, vocal de-reverb, guitar), and a full two-way
 (vocals / instrumental) lineup. Point it at any recording and get the stems back as
 lossless WAV/FLAC files or as live `AUDIO` you can feed into any other node. All models
-run at 44.1 kHz stereo.
+run at 44.1 kHz stereo. The **Roformer Ensemble** node blends the same stem from several
+model runs into one better stem — the recipe behind the top [mvsep.com](https://mvsep.com/quality_checker/multisong_leaderboard)
+leaderboard results — and a batched audio input separates every element at once.
 
 ## Install
 
@@ -63,21 +65,66 @@ composes with any other model in the graph.
 Runs the loaded model on the audio input — any sample rate (resampled internally to 44.1
 kHz) and any channel count (downmixed / upmixed to the model's trained count).
 - `model` — from the Loader.
-- `audio` — the mix to separate (from **Load Audio**, or the audio track of a loaded video).
+- `audio` — the mix to separate (from **Load Audio**, or the audio track of a loaded
+  video). A batched `(B, C, N)` audio separates every element at once (one at a time on
+  the GPU, staged in RAM) — the stems payload comes back batched.
 - `chunk_seconds` — `0` (default) uses the model's own training window (about 11–22 s);
   set a positive value to use less VRAM. Longer audio is processed in overlapping windows
   with a crossfade, so the output is exactly the length of the input. If a window runs out
   of GPU memory the node halves it and retries (up to three times, logged) before raising
   an actionable error.
+- `tta` — test-time augmentation: the model also runs on the time-flipped mix and the two
+  runs are averaged per stem. Doubles the run time; smooths flaky transients and edge
+  artifacts. The exact-decomposition property survives — the averaged stems still sum to
+  the input.
 - Outputs (at the file's own sample rate):
-  - `stems` — all stems, for To Audio / Save Audio below.
+  - `stems` — all stems (batched if the input was), for To Audio / Save Audio below.
   - `target` / `other` — the model's target stem and the other stem as ready `AUDIO`
     (for multi-stem models, `other` is the model's own `other` stem when it has one),
     ready to preview or wire on.
   - `info_json` — model, stem names, lengths, rates.
 
+### Roformer Ensemble
+Blends the same stem from two or more model runs into one better stem — the ensemble
+behind the top [mvsep.com](https://mvsep.com/quality_checker/multisong_leaderboard) leaderboard entries
+(several of the best results are two-model blends, not single models). Wire the stem's
+`AUDIO` from several Separate runs (e.g. the vocals from two different models) into the
+audio slots: two are required, and up to eight appear as you connect them. One song per
+input, one sample rate, the same channel count. The graph you build **is** the saved
+ensemble: every slot, algorithm and option is in the workflow file.
+- `audio` slots (2–8) — the same stem from one model run each.
+- `algorithm`
+  - `average` (default) — a plain time-domain mean;
+  - `max spec` — per STFT bin, keep the value of the input with the larger magnitude
+    (phase included) — each model's most confident content; the leaderboard choice for
+    vocals;
+  - `min spec` — the smaller magnitude — suppresses leakage; the leaderboard choice for
+    the instrumental.
+
+  The spectral algorithms are the exact per-bin magnitude-selection math of The Ultimate
+  Vocal Remover's ensemble (Hann 2048/1024 STFT, the winner's complex value kept).
+- `normalize` — `off` (default); `anti clip` scales a clipping blend (peak above 1.0) back
+  to full scale — never raises a quiet result; `full scale` always rescales to peak 1.0.
+- `align` — search a small time offset (up to the advanced `align_max_seconds`, default
+  1 s) that best aligns each input with the first, before blending. For inputs from
+  different processing paths (other tools' resamplers, trims); two runs of this pack are
+  sample-accurate, so leave it off there.
+- `invert` — exact residual: the output becomes the connected `mix` minus the blend
+  (connect the original audio to `mix`). The leaderboard move: ensemble the vocals,
+  subtract for the instrumental — blend + output == mix holds exactly.
+- `mix` — the original mix (from **Load Audio**); required when `invert` is on, ignored
+  otherwise.
+- Advanced: `align_max_seconds` (0.0625–2 s search radius) and `n_fft` (STFT window for
+  the spectral algorithms, 512–8192; 2048 is what the mvsep winners use).
+
+`example_workflows/roformer_ensemble.json` is the two-model recipe: the mix runs through
+`sw-6stem` and a two-way vocal model, **max spec** blends the two vocals, and a second
+ensemble (**average** + `invert`, mix connected) subtracts them from the mix for the
+exact-residual instrumental.
+
 ### Roformer To Audio
-Extracts one stem from a stems payload as `AUDIO` for feeding any other node. `stem` is a
+Extracts one stem from a stems payload as `AUDIO` for feeding any other node. A batched
+payload comes back batched. `stem` is a
 dropdown of every stem name the pack knows about, sorted by priority (vocals first, then the
 instrumental, drums, bass, guitar, piano, other) and merged case-insensitively — one
 `vocals`, one `instrument`, one `other`, regardless of how the model spells them (the model's
@@ -93,12 +140,17 @@ local models and custom checkpoints whose stem names are not in the standard lis
 
 ### Roformer Save Audio
 Writes every stem in the payload to ComfyUI's output folder, numbered so runs never
-overwrite each other; the saved files are linked on the node (the audio icon).
+overwrite each other; the saved files are linked on the node (the audio icon). A batched
+stems payload (from a batched Separate) writes one file per element — WAV suffixed
+`_b001..`, FLAC numbered sequentially.
 - `stems` — the stems payload from Separate.
 - `filename_prefix` — the output file name (without extension; subfolders allowed).
 - `format` — `wav` (lossless float32, what the audio nodes work with) or `flac` (lossless,
   smaller, written through the native ComfyUI audio saver so the workflow prompt is embedded
   in the file metadata).
+- `normalize` — `off` (default); `anti clip` scales a clipping stem back to full scale
+  before writing — never raises a quiet stem; `full scale` always rescales every stem to
+  peak 1.0.
 
 ### Roformer Info
 The separation summary as a JSON string, for branching or saving run metadata.

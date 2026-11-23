@@ -142,8 +142,49 @@ def _install_comfy_api_stub() -> None:
         return outer
 
     class _Audio:
+        io_type = "AUDIO"
         Input = _Base
         Output = _Base
+
+    class _Boolean:
+        class Input(_Base):
+            def __init__(self, id=None, display_name=None, optional=False, tooltip=None,
+                         default=None, label_on=None, label_off=None, **kwargs):
+                super().__init__(id, display_name, tooltip, optional, **kwargs)
+                self.default = default
+
+    class _Float:
+        class Input(_Base):
+            def __init__(self, id=None, display_name=None, optional=False, tooltip=None,
+                         default=None, min=None, max=None, step=None, round=None, **kwargs):
+                super().__init__(id, display_name, tooltip, optional, **kwargs)
+                self.default, self.min, self.max, self.step = default, min, max, step
+
+    class _DynamicInput(_Base):
+        """Base of the schema's dynamic inputs (Autogrow & co): one execute parameter
+        receives a dict of the generated inputs' values. io_type is a class attribute here
+        and a property on the real classes - both resolve through the instance."""
+        io_type = "COMFY_DYNAMIC"
+
+    class _Autogrow:
+        Type = dict
+
+        class TemplatePrefix:
+            def __init__(self, input, prefix, min=1, max=10):
+                self.input, self.prefix, self.min, self.max = input, prefix, min, max
+                self.names = [f"{prefix}{i}" for i in range(max)]
+
+        class TemplateNames:
+            def __init__(self, input, names, min=1):
+                self.input, self.names, self.min = input, names, min
+
+        class Input(_DynamicInput):
+            io_type = "COMFY_AUTOGROW_V3"
+
+            def __init__(self, id=None, template=None, display_name=None, optional=False,
+                         tooltip=None, **kwargs):
+                super().__init__(id, display_name, tooltip, optional, **kwargs)
+                self.template = template
 
     class _Combo:
         class Input(_Base):
@@ -229,11 +270,12 @@ def _install_comfy_api_stub() -> None:
         SavedResult=_SavedResult, SavedAudios=_SavedAudios, AudioSaveHelper=_AudioSaveHelper,
     )
     io = types.SimpleNamespace(
-        Custom=_custom, Audio=_Audio, Combo=_Combo, Int=_Int, String=_String,
+        Custom=_custom, Audio=_Audio, Boolean=_Boolean, Combo=_Combo, Float=_Float,
+        Int=_Int, String=_String,
         Schema=_Schema, ComfyNode=_ComfyNode, NodeOutput=_NodeOutput,
         Hidden=_Hidden,
         FolderType=_FolderType,
-        Autogrow=types.SimpleNamespace(Input=type("_AutogrowInput", (), {})),
+        Autogrow=_Autogrow, DynamicInput=_DynamicInput,
     )
     latest = types.ModuleType("comfy_api.latest")
     latest.io = io

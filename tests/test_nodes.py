@@ -13,8 +13,8 @@ def test_node_schemas(nodes):
     """V3: every node's schema (node_id / display name / category / description / io ids) is consistent."""
     assert set(nodes.NODE_CLASS_MAPPINGS) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS)
     assert set(nodes.NODE_CLASS_MAPPINGS) == {
-        "RoformerLoader", "RoformerSeparate", "RoformerToAudio", "CustomRoformerToAudio",
-        "RoformerSaveAudio", "RoformerInfo",
+        "RoformerLoader", "RoformerSeparate", "RoformerEnsemble", "RoformerToAudio",
+        "CustomRoformerToAudio", "RoformerSaveAudio", "RoformerInfo",
     }
     categories = set()
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
@@ -43,6 +43,11 @@ def test_tooltips_and_aliases(nodes):
             if io_type is not None and io_type not in widget_types:
                 continue  # a link input: the hover text travels with the producer's output
             assert inp.tooltip, (name, inp.id)
+            # dynamic inputs (autogrow): the generated slots are copies of the template input,
+            # so its tooltip is what the user hovers - it counts as the input's
+            template = getattr(inp, "template", None)
+            if template is not None:
+                assert getattr(template.input, "tooltip", None), (name, inp.id)
         if name.endswith("Loader"):
             continue
         assert schema.search_aliases, name
@@ -76,11 +81,14 @@ def test_loader_choices(nodes, models_dir, tiny_model):
 
 def test_audio_to_tensor(nodes, make_audio):
     x, rate = nodes.audio_to_tensor(make_audio(t=0.5, rate=48000, freq=220.0, channels=1))
-    assert rate == 48000 and x.shape == (1, 24000) and x.dtype == torch.float32
+    assert rate == 48000 and x.shape == (1, 1, 24000) and x.dtype == torch.float32
     stereo = {"waveform": torch.zeros(1, 2, 100), "sample_rate": 16000}
     stereo["waveform"][0, 0] = 1.0
     x, _ = nodes.audio_to_tensor(stereo)
-    assert x.shape == (2, 100) and np.allclose(x.numpy(), [[1.0] * 100, [0.0] * 100])
+    assert x.shape == (1, 2, 100) and np.allclose(x.numpy()[0], [[1.0] * 100, [0.0] * 100])
+    batched = {"waveform": torch.zeros(2, 2, 50), "sample_rate": 44100}
+    x, _ = nodes.audio_to_tensor(batched)
+    assert x.shape == (2, 2, 50)  # the batch survives, for batched separation
     with pytest.raises(ValueError):
         nodes.audio_to_tensor({"waveform": torch.zeros(1, 1, 0), "sample_rate": 44100})
     with pytest.raises(ValueError):
@@ -102,14 +110,15 @@ def test_load_and_separate(nodes, models_dir, tiny_model, make_audio):
     stems_payload, target_audio, other_audio, info_json = out.args
     assert set(stems_payload["stems"]) == {"vocals", "other"}
     for name, wave in stems_payload["stems"].items():
-        assert wave.shape == (2, 88200), name
+        assert wave.shape == (1, 2, 88200), name  # (B, C, N), B = 1 for a single song
     # the residual is mixture-minus-target, so target + other is the input exactly
     total = stems_payload["stems"]["vocals"] + stems_payload["stems"]["other"]
-    assert torch.allclose(total, audio["waveform"][0], atol=1e-5)
+    assert torch.allclose(total, audio["waveform"], atol=1e-5)
     assert target_audio["sample_rate"] == 44100 and target_audio["waveform"].shape[0] == 1
     info = json.loads(info_json)
     assert info["target"] == "vocals" and info["seconds"] == pytest.approx(2.0, abs=0.01)
     assert info["model"] == "tiny (local)"
+    assert info["tta"] is False and info["batch"] == 1
 
 
 def test_separate_resamples_to_source_rate(nodes, models_dir, tiny_model, make_audio):
@@ -118,7 +127,7 @@ def test_separate_resamples_to_source_rate(nodes, models_dir, tiny_model, make_a
     stems_payload, _, _, _ = nodes.RoformerSeparate.execute(wrapper, audio, 0).args
     assert stems_payload["sample_rate"] == 48000
     for wave in stems_payload["stems"].values():
-        assert wave.shape[1] == pytest.approx(48000, rel=0.005)  # soxr resample length
+        assert wave.shape[2] == pytest.approx(48000, rel=0.005)  # soxr resample length
 
 
 def test_separate_chunk_override(nodes, models_dir, tiny_model, make_audio):
@@ -127,9 +136,9 @@ def test_separate_chunk_override(nodes, models_dir, tiny_model, make_audio):
     stems_payload, _, _, info_json = nodes.RoformerSeparate.execute(wrapper, audio, 2).args
     assert json.loads(info_json)["chunk_seconds"] == 2
     for wave in stems_payload["stems"].values():
-        assert wave.shape[1] == 264600  # exact length in and out
+        assert wave.shape == (1, 2, 264600)  # exact length in and out
     total = stems_payload["stems"]["vocals"] + stems_payload["stems"]["other"]
-    assert torch.allclose(total, audio["waveform"][0], atol=2e-3)
+    assert torch.allclose(total, audio["waveform"], atol=2e-3)
 
 
 def test_to_audio_and_info(nodes, models_dir, tiny_model, make_audio):
@@ -142,9 +151,9 @@ def test_to_audio_and_info(nodes, models_dir, tiny_model, make_audio):
     (auto,) = nodes.RoformerToAudio.execute(stems_payload, nodes.AUTO_STEM).args
     (fallback,) = nodes.RoformerToAudio.execute(stems_payload, "no-such-stem").args
     (upper,) = nodes.RoformerToAudio.execute(stems_payload, "OTHER").args
-    assert torch.equal(upper["waveform"][0], stems_payload["stems"]["other"])
-    assert torch.equal(auto["waveform"][0], stems_payload["stems"]["vocals"])
-    assert torch.equal(fallback["waveform"][0], stems_payload["stems"]["vocals"])
+    assert torch.equal(upper["waveform"][0], stems_payload["stems"]["other"][0])
+    assert torch.equal(auto["waveform"][0], stems_payload["stems"]["vocals"][0])
+    assert torch.equal(fallback["waveform"][0], stems_payload["stems"]["vocals"][0])
     (text,) = nodes.RoformerInfo.execute(stems_payload).args
     assert json.loads(text)["stems"] == ["vocals", "other"]
 
@@ -264,6 +273,42 @@ def test_stems_payload_contract(nodes, tiny_model, make_audio):
     assert list(payload["stems"]) == ["vocals", "other"]
     n = int(0.2 * 48000)
     for name, wave in payload["stems"].items():
-        assert torch.is_tensor(wave) and wave.dim() == 2 and wave.shape[0] == 2
-        assert abs(wave.shape[1] - n) <= 2  # exact to within a soxr round-trip sample
+        assert torch.is_tensor(wave) and wave.dim() == 3
+        assert wave.shape[0] == 1 and wave.shape[1] == 2
+        assert abs(wave.shape[2] - n) <= 2  # exact to within a soxr round-trip sample
     json.loads(info_json)
+
+
+def test_separate_batched_audio(nodes, models_dir, tiny_model):
+    """A batched (B, C, N) input separates every element; the payload comes back batched."""
+    wrapper, _ = nodes.RoformerLoader.execute("tiny", "cpu").args
+    a1 = torch.sin(2 * 3.141592653589793 * 440 * torch.arange(44100) / 44100)
+    a2 = torch.sin(2 * 3.141592653589793 * 880 * torch.arange(44100) / 44100)
+    audio = {"waveform": torch.stack([a1, a2]).unsqueeze(1).repeat(1, 2, 1), "sample_rate": 44100}
+    payload, target, other, info_json = nodes.RoformerSeparate.execute(wrapper, audio, 0).args
+    info = json.loads(info_json)
+    assert info["batch"] == 2
+    for name, wave in payload["stems"].items():
+        assert wave.shape == (2, 2, 44100), name  # (B, C, N)
+    assert target["waveform"].shape == (2, 2, 44100)
+    # element 1's residual property still holds inside the batch
+    total = payload["stems"]["vocals"][1] + payload["stems"]["other"][1]
+    assert torch.allclose(total, audio["waveform"][1], atol=1e-4)
+    # and To Audio hands the batch straight through
+    (vocals,) = nodes.RoformerToAudio.execute(payload, "vocals").args
+    assert vocals["waveform"].shape == (2, 2, 44100)
+
+
+def test_separate_tta(nodes, models_dir, tiny_model, make_audio):
+    """TTA: the model also runs on the time-flipped mix and the runs are averaged per stem."""
+    wrapper, _ = nodes.RoformerLoader.execute("tiny", "cpu").args
+    audio = make_audio(t=1.0, rate=44100, channels=2)
+    payload, _, _, info_json = nodes.RoformerSeparate.execute(wrapper, audio, 0, True).args
+    info = json.loads(info_json)
+    assert info["tta"] is True and info["batch"] == 1
+    for name, wave in payload["stems"].items():
+        assert wave.shape == (1, 2, 44100) and torch.isfinite(wave).all(), name
+    # TTA keeps the mixture-minus-separation property: both runs are flipped back, the
+    # residual is exact per run, so the averaged stems still decompose the input
+    total = payload["stems"]["vocals"] + payload["stems"]["other"]
+    assert torch.allclose(total, audio["waveform"], atol=1e-4)

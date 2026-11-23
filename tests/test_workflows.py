@@ -9,7 +9,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("workflow", ["roformer_separation"])
+# the schema's dynamic input types (autogrow & co): one execute parameter, a dict of the
+# generated inputs' values - they are link inputs, never widgets_values
+DYNAMIC_IO = {"COMFY_AUTOGROW_V3", "COMFY_DYNAMICCOMBO_V3", "COMFY_DYNAMICGROUP_V3"}
+
+
+@pytest.mark.parametrize("workflow", ["roformer_separation", "roformer_ensemble"])
 def test_example_workflow(nodes, workflow):
     data = json.loads((ROOT / "example_workflows" / f"{workflow}.json").read_text())
     by_id = {n["id"]: n for n in data["nodes"]}
@@ -32,7 +37,11 @@ def test_example_workflow(nodes, workflow):
         if cls is None:
             continue  # a native node (LoadAudio, PreviewAudio, MarkdownNote): links already checked
         schema = cls.define_schema()
-        inputs = {i.id: i for i in schema.inputs if not i.optional}
+        # dynamic inputs (instance io_type: a property on the real classes, an attribute on
+        # the test stub) expand to generated link inputs - never widgets_values
+        inputs = {i.id: i for i in schema.inputs
+                  if not i.optional
+                  and getattr(i, "io_type", None) not in DYNAMIC_IO}
         linked = {inp["name"] for inp in node.get("inputs") or []}
         widgets = [name for name in inputs if name not in linked]
         assert len(node["widgets_values"]) == len(widgets), node["type"]

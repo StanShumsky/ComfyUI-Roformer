@@ -25,6 +25,7 @@ import comfy.model_management as mm
 from comfy.utils import ProgressBar
 from comfy_api.latest import io, UI
 
+from .roformer import ensemble
 from .roformer.audio_io import audio_to_tensor, resample, to_audio_payload
 from .roformer.loading import load_roformer, local_models
 from .roformer.manifest import MODELS
@@ -127,25 +128,34 @@ class RoformerSeparate(io.ComfyNode):
             description=(
                 "Separate the audio with the loaded model. The input is resampled to the model's "
                 "44.1 kHz (stereo, or downmixed / upmixed to the model's trained channel count) and "
-                "the stems come back at the file's own sample rate. chunk_seconds: 0 = the model's own "
-                "training window from its config (recommended); a positive value caps the window for "
-                "low-VRAM machines (overlapping windows are overlap-added with a linear crossfade). "
-                "Outputs: the stems payload (Roformer To Audio / Save Audio below), the target stem and "
-                "the other stem as ready AUDIO (for multi-stem models: the 'other' stem when the model "
-                "has one, else the first non-target stem - use the stems payload for the full set), "
-                "and info_json (model, stems, lengths, chunking)."
+                "the stems come back at the file's own sample rate. A batched audio input (B, C, N) "
+                "separates every element - the stems payload comes back batched too. chunk_seconds: "
+                "0 = the model's own training window from its config (recommended); a positive value "
+                "caps the window for low-VRAM machines (overlapping windows are overlap-added with a "
+                "linear crossfade). tta: test-time augmentation - the model also runs on the "
+                "time-flipped mix and the two runs are averaged (doubles the time, smooths "
+                "flaky transients). Outputs: the stems payload (Roformer To Audio / Save Audio "
+                "below), the target stem and the other stem as ready AUDIO (for multi-stem models: "
+                "the 'other' stem when the model has one, else the first non-target stem - use the "
+                "stems payload for the full set), and info_json (model, stems, lengths, chunking, "
+                "tta, batch)."
             ),
             inputs=[
                 ROFORMER_MODEL.Input("model"),
                 io.Audio.Input("audio",
                                tooltip="The mix to separate, any sample rate (resampled internally to the "
                                        "model's 44.1 kHz) and any channel count (downmixed / upmixed to the "
-                                       "model's trained count)."),
+                                       "model's trained count). A batched (B, C, N) audio separates "
+                                       "every element; the stems payload comes back batched."),
                 io.Int.Input("chunk_seconds", default=0, min=0, max=240,
                              tooltip="0 = the model's own training window from its config (recommended); a "
                                      "positive value caps the window for low-VRAM machines. If a window "
                                      "runs out of GPU memory the node halves it and retries (up to three "
                                      "times, logged)."),
+                io.Boolean.Input("tta", default=False,
+                                 tooltip="Test-time augmentation: the model also runs on the time-flipped "
+                                         "mix and the two runs are averaged per stem. Doubles the run "
+                                         "time; smooths flaky transients and edge artifacts."),
             ],
             outputs=[
                 ROFORMER_STEMS.Output(id="stems", display_name="stems"),
@@ -156,14 +166,15 @@ class RoformerSeparate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model: dict, audio: dict, chunk_seconds: int = 0) -> io.NodeOutput:
+    def execute(cls, model: dict, audio: dict, chunk_seconds: int = 0, tta: bool = False) -> io.NodeOutput:
         x, rate = audio_to_tensor(audio)
         p = model
-        if p["num_channels"] == 1 and x.shape[0] > 1:
-            x = x.mean(0, keepdim=True)
-        elif p["num_channels"] == 2 and x.shape[0] == 1:
-            x = x.repeat(2, 1)
+        if p["num_channels"] == 1 and x.shape[1] > 1:
+            x = x.mean(1, keepdim=True)
+        elif p["num_channels"] == 2 and x.shape[1] == 1:
+            x = x.repeat(1, 2, 1)
         x44 = resample(x, rate, p["sample_rate"])
+        B = x44.shape[0]
         # Load the model onto the run device (ComfyUI's model management evicts it again when
         # other nodes need the VRAM) and complete a partial load.
         patcher = p["patcher"]
@@ -197,31 +208,47 @@ class RoformerSeparate(io.ComfyNode):
         chunk = max(chunk, 1024)
         min_chunk = max(1024, int(p["sample_rate"]))  # one second: below this, separation degrades
         rate44 = p["sample_rate"]
+        runs = 2 if tta else 1  # TTA: the flipped run doubles the work per song
+        # Progress is sized for the whole batch (per-song chunk plans at the current window;
+        # an OOM retry only overruns the tail, which the bars clamp).
+        total = 0
+        for b in range(B):
+            _, _, n_chunks = Separator.chunk_plan(x44[b].shape[-1], chunk)
+            total += n_chunks * runs + runs
+        progress = ProgressBar(total)
+        stems_per_song = []
         attempts = 0
-        while True:
-            _, _, n_chunks = Separator.chunk_plan(x44.shape[-1], chunk)
-            progress = ProgressBar(n_chunks + 1)
-            with tqdm(total=n_chunks + 1, desc="Roformer separation") as tq:
-                try:
-                    stems44 = Separator(p).run(x44, chunk_seconds, progress=progress, tqdm_bar=tq,
-                                               chunk=chunk)
-                    break
-                except (torch.OutOfMemoryError, RuntimeError) as exc:
-                    if not _is_oom(exc):  # non-OOM errors pass through untouched
-                        raise
-                    if attempts >= 3 or chunk <= min_chunk:
-                        raise ValueError(
-                            f"Roformer: out of GPU memory separating even at a "
-                            f"{chunk / rate44:.1f} s window on {device}. Cap chunk_seconds lower, "
-                            "use a smaller model, or set the loader's device to cpu."
-                        ) from exc
-                    attempts += 1
-                    LOGGER.warning(
-                        "Roformer: out of memory at a %.1f s window; retrying at %.1f s.",
-                        chunk / rate44, chunk / 2 / rate44,
-                    )
-                    chunk = max(min_chunk, chunk // 2)
-                    mm.soft_empty_cache()
+        with tqdm(total=total, desc="Roformer separation") as tq:
+            for b in range(B):
+                while True:
+                    try:
+                        s = Separator(p).run(x44[b], 0, progress=progress, tqdm_bar=tq, chunk=chunk)
+                        if tta:
+                            sf_ = Separator(p).run(x44[b].flip(-1), 0, progress=progress,
+                                                   tqdm_bar=tq, chunk=chunk)
+                            # flipping both the run and its residual stem back keeps the
+                            # mixture-minus-separation property: avg(voc) + avg(other) == mix
+                            s = {k: (v + sf_[k].flip(-1)) * 0.5 for k, v in s.items()}
+                        break
+                    except (torch.OutOfMemoryError, RuntimeError) as exc:
+                        if not _is_oom(exc):  # non-OOM errors pass through untouched
+                            raise
+                        if attempts >= 3 or chunk <= min_chunk:
+                            raise ValueError(
+                                f"Roformer: out of GPU memory separating even at a "
+                                f"{chunk / rate44:.1f} s window on {device}. Cap chunk_seconds lower, "
+                                "use a smaller model, or set the loader's device to cpu."
+                            ) from exc
+                        attempts += 1
+                        LOGGER.warning(
+                            "Roformer: out of memory at a %.1f s window; retrying the rest of "
+                            "the batch at %.1f s.",
+                            chunk / rate44, chunk / 2 / rate44,
+                        )
+                        chunk = max(min_chunk, chunk // 2)
+                        mm.soft_empty_cache()
+                stems_per_song.append(s)
+        stems44 = {k: torch.stack([s[k] for s in stems_per_song]) for k in stems_per_song[0]}
         stems = {k: resample(v, p["sample_rate"], rate) for k, v in stems44.items()}
         mm.soft_empty_cache()
 
@@ -236,13 +263,168 @@ class RoformerSeparate(io.ComfyNode):
             "source_rate": rate, "model_rate": p["sample_rate"],
             "channels_in": int(audio["waveform"].shape[-2]),
             "chunk_seconds": 0 if chunk_seconds <= 0 else chunk_seconds,
+            "tta": tta, "batch": B,
         }
+        LOGGER.info("Roformer: separated %d song(s), %d stems (%s), %.2f s @ %d Hz%s.",
+                    B, len(names), ", ".join(names), x.shape[-1] / rate, rate,
+                    ", TTA on" if tta else "")
         return io.NodeOutput(
             {"stems": stems, "sample_rate": rate, "info": info},
             to_audio_payload(stems[target_name], rate),
             to_audio_payload(stems[other_name], rate),
             json.dumps(info, indent=2, sort_keys=True),
         )
+
+
+class RoformerEnsemble(io.ComfyNode):
+    """Blend the same stem from 2-8 model runs with UVR's exact ensemble math."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="RoformerEnsemble",
+            display_name="Roformer Ensemble",
+            category=CATEGORY,
+            search_aliases=["ensemble", "blend", "combine stems", "max spec", "min spec",
+                            "average", "exact residual", "mvsep ensemble"],
+            description=(
+                "Blend the same stem from two or more model runs into one better stem - the ensemble "
+                "behind the top mvsep.com leaderboard entries (several of the best results are two- "
+                "model blends, not single models). Connect the stem's AUDIO from several Separate runs "
+                "(e.g. the vocals from two different models) to the audio slots: two are required, and "
+                "up to eight appear as you connect them. One song per input, one sample rate, the same "
+                "channel count. algorithm: 'max spec' keeps, per STFT bin, the value of the input with "
+                "the larger magnitude (phase included - the leaderboard choice for vocals); 'min spec' "
+                "the smaller one (suppresses leakage - the leaderboard choice for the instrumental); "
+                "'average' is a plain time-domain mean - exactly UVR's math (Hann 2048/1024 STFT). "
+                "invert: exact residual - the output becomes mix minus the blend (connect the "
+                "original audio to mix): ensemble the vocals, subtract for the instrumental, and "
+                "blend + output == mix holds exactly. normalize: 'anti clip' scales a clipping blend "
+                "back to full scale (never raises a quiet result); 'full scale' always rescales. "
+                "align: search a small time offset (up to the advanced align_max_seconds, default "
+                "1 s) that best aligns each input with the first - for inputs from different "
+                "processing paths; two runs of this pack are sample-accurate, so leave it off there. "
+                "The graph you build is the saved ensemble: every slot, algorithm and option is in "
+                "the workflow file."
+            ),
+            inputs=[
+                io.Autogrow.Input(
+                    "audios",
+                    template=io.Autogrow.TemplatePrefix(
+                        io.Audio.Input("audio", tooltip="The same stem from one model run (one song, "
+                                                        "one sample rate, same channel count as the "
+                                                        "other inputs)."),
+                        prefix="audio", min=2, max=8),
+                    tooltip="The same stem from each model run - connect the stem's AUDIO from several "
+                            "Separate runs (e.g. the vocals from two different models). Two slots are "
+                            "required, up to eight appear as you connect."),
+                io.Combo.Input("algorithm", options=list(ensemble.ALGORITHMS), default="average",
+                               tooltip="max spec: per STFT bin, the value of the input with the larger "
+                                       "magnitude (keeps each model's most confident content - the "
+                                       "leaderboard choice for vocals). min spec: the smaller "
+                                       "magnitude (suppresses leakage - the leaderboard choice for the "
+                                       "instrumental). average: plain time-domain mean. Same math as "
+                                       "UVR's ensemble (Hann 2048/1024 STFT, phase preserved)."),
+                io.Combo.Input("normalize", options=list(ensemble.NORMALIZE_MODES), default="off",
+                               tooltip="off: as-is. anti clip: if the blend clips (peak above 1.0) scale "
+                                       "it back to full scale - never raises a quiet result. full "
+                                       "scale: always rescale to peak 1.0."),
+                io.Boolean.Input("align", default=False,
+                                 tooltip="Search a small time offset (up to the advanced "
+                                         "align_max_seconds, default 1 s) that best aligns every input "
+                                         "with the first before blending - for inputs from different "
+                                         "processing paths (different sample rates, trims, "
+                                         "resamplers). Off: the inputs are assumed sample-accurate "
+                                         "(two runs of this pack always are)."),
+                io.Float.Input("align_max_seconds", default=1.0, min=0.0625, max=2.0, step=0.0625,
+                               advanced=True,
+                               tooltip="Search radius for align, in seconds (0.0625-2, the UVR "
+                                       "alignment window). Only read when align is on."),
+                io.Boolean.Input("invert", default=False,
+                                 tooltip="Exact residual: the output becomes mix minus the blend "
+                                         "(connect the original audio to the mix input). The "
+                                         "leaderboard move: ensemble the vocals, subtract for the "
+                                         "instrumental - blend + output == mix exactly."),
+                io.Audio.Input("mix", optional=True,
+                               tooltip="The original mix (from Load Audio). Required when invert is "
+                                       "on; ignored otherwise."),
+                io.Int.Input("n_fft", default=2048, min=512, max=8192, step=512, advanced=True,
+                             tooltip="STFT window for the spectral algorithms (hop = half of it). "
+                                     "2048/1024 is what UVR and the mvsep winners use; leave it."),
+            ],
+            outputs=[
+                io.Audio.Output(id="audio", display_name="audio",
+                                tooltip="The blended stem at the inputs' own sample rate."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audios: io.Autogrow.Type, algorithm: str, normalize: str, align: bool,
+                align_max_seconds: float, invert: bool, mix: dict = None,
+                n_fft: int = 2048) -> io.NodeOutput:
+        names = sorted((k for k in (audios or {}) if audios[k] is not None),
+                       key=lambda n: int(n.removeprefix("audio")))
+        if len(names) < 2:
+            raise ValueError(
+                "Roformer Ensemble: connect at least two audio inputs - the same stem from two model "
+                "runs (e.g. the vocals from two different Separates)."
+            )
+        waves, rates = [], set()
+        for k in names:
+            w, rate = audio_to_tensor(audios[k])
+            if w.shape[0] != 1:
+                raise ValueError(
+                    f"Roformer Ensemble: input {k} is batched (B={w.shape[0]}) - the ensemble blends "
+                    "one song per input; separate the batch first (one song per Separate run)."
+                )
+            if waves and w.shape[1] != waves[0].shape[0]:
+                raise ValueError(
+                    f"Roformer Ensemble: the inputs have different channel counts "
+                    f"({waves[0].shape[0]} vs {w.shape[1]}) - connect stems from the same mix, at the "
+                    "same channel count."
+                )
+            waves.append(w[0])
+            rates.add(rate)
+        if len(rates) > 1:
+            raise ValueError(
+                f"Roformer Ensemble: the inputs have different sample rates {sorted(rates)} - resample "
+                "them to one rate first (e.g. save and re-load one of them, or feed both runs from the "
+                "same source)."
+            )
+        rate = rates.pop()
+        length = min(w.shape[-1] for w in waves)
+        waves = [w[:, :length] for w in waves]
+        if align:
+            for i, w in enumerate(waves[1:], start=1):
+                off = ensemble.align_offset(waves[0], w, align_max_seconds, rate)
+                if off:
+                    LOGGER.info("Roformer Ensemble: aligned input %d by %d samples (%.4f s).",
+                                i + 1, off, off / rate)
+                    waves[i] = ensemble.shift_wave(w, off, length)
+        y = ensemble.blend(algorithm, waves, n_fft, length)
+        if normalize != "off":
+            y = ensemble.normalize_wave(y, normalize)
+        if invert:
+            if mix is None:
+                raise ValueError(
+                    "Roformer Ensemble: invert (exact residual) needs the mix - connect the original "
+                    "audio (e.g. from Load Audio) to the mix input."
+                )
+            mx, mrate = audio_to_tensor(mix)
+            if mx.shape[0] != 1:
+                raise ValueError(
+                    "Roformer Ensemble: the mix input is batched (B=%d) - connect one song." % mx.shape[0]
+                )
+            if mrate != rate:
+                raise ValueError(
+                    f"Roformer Ensemble: the mix sample rate ({mrate} Hz) differs from the inputs "
+                    f"({rate} Hz) - resample the mix first."
+                )
+            y = ensemble.exact_residual(mx[0], y)
+        LOGGER.info("Roformer Ensemble: %s of %d input(s), %d samples @ %d Hz%s.",
+                    algorithm, len(waves), y.shape[-1], rate,
+                    ", exact residual" if invert else "", )
+        return io.NodeOutput(to_audio_payload(y, rate))
 
 
 AUTO_STEM = "(auto)"
@@ -344,8 +526,11 @@ class RoformerSaveAudio(io.ComfyNode):
                 "Write the stems to ComfyUI's output folder, numbered so runs never overwrite "
                 "each other: WAV as <prefix>_XXXXX_<stem>.wav (lossless float32), FLAC through the "
                 "native ComfyUI audio saver as <prefix>/<stem>_XXXXX.flac (lossless, with the "
-                "workflow prompt embedded in the file metadata). The saved files are linked on the "
-                "node (the audio icon)."
+                "workflow prompt embedded in the file metadata). A batched stems payload (from a "
+                "batched Separate) writes one file per element: WAV suffixed _b001.., FLAC numbered "
+                "sequentially. normalize: 'anti clip' scales a clipping stem back to full scale "
+                "before writing (never raises a quiet stem); 'full scale' always rescales. The "
+                "saved files are linked on the node (the audio icon)."
             ),
             inputs=[
                 ROFORMER_STEMS.Input("stems"),
@@ -356,13 +541,17 @@ class RoformerSaveAudio(io.ComfyNode):
                                tooltip="wav = lossless float32 (what the audio nodes work with); flac = "
                                        "lossless 16-bit, smaller, and carries the workflow prompt in the "
                                        "file metadata."),
+                io.Combo.Input("normalize", options=list(ensemble.NORMALIZE_MODES), default="off",
+                               tooltip="off: as-is. anti clip: if a stem clips (peak above 1.0) scale it "
+                                       "back to full scale before writing - never raises a quiet stem. "
+                                       "full scale: always rescale every stem to peak 1.0."),
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             outputs=[],
         )
 
     @classmethod
-    def execute(cls, stems: dict, filename_prefix: str, format: str) -> io.NodeOutput:
+    def execute(cls, stems: dict, filename_prefix: str, format: str, normalize: str = "off") -> io.NodeOutput:
         folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
             filename_prefix, folder_paths.get_output_directory(), 1, 1
         )
@@ -372,12 +561,15 @@ class RoformerSaveAudio(io.ComfyNode):
         results = []
         for name, wave in stems["stems"].items():
             safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+            wave = ensemble.normalize_wave(wave, normalize)  # (B, C, N)
+            n = wave.shape[0]
             if format == "flac":
                 # the native FLAC path: the helper embeds the workflow prompt in the file
                 # metadata (from the hidden inputs the engine injects into cls.hidden) and
-                # hands back the saved-file descriptors the node UI links to
+                # hands back the saved-file descriptors the node UI links to; it writes one
+                # file per batch element
                 saved = UI.AudioSaveHelper.save_audio(
-                    {"waveform": wave.float().cpu()[None], "sample_rate": rate},
+                    {"waveform": wave.float().cpu(), "sample_rate": rate},
                     filename_prefix=f"{filename_prefix}/{safe}",
                     folder_type=io.FolderType.output, cls=cls, format="flac",
                 )
@@ -386,13 +578,15 @@ class RoformerSaveAudio(io.ComfyNode):
                     LOGGER.info("Roformer: wrote %s/%s",
                                 s.get("subfolder", ""), s.get("filename", ""))
             else:
-                path = Path(folder) / f"{filename}_{counter:05d}_{safe}.wav"
-                sf.write(str(path), wave.cpu().numpy().T, rate,  # (N, C) for soundfile
-                         subtype="FLOAT")
-                results.append(UI.SavedResult(
-                    filename=path.name, subfolder=subfolder, type=io.FolderType.output))
-                LOGGER.info("Roformer: wrote %s", path)
-                counter += 1
+                for b in range(n):
+                    suffix = f"_b{b + 1:03d}" if n > 1 else ""
+                    path = Path(folder) / f"{filename}_{counter:05d}_{safe}{suffix}.wav"
+                    sf.write(str(path), wave[b].cpu().numpy().T, rate,  # (N, C) for soundfile
+                             subtype="FLOAT")
+                    results.append(UI.SavedResult(
+                        filename=path.name, subfolder=subfolder, type=io.FolderType.output))
+                    LOGGER.info("Roformer: wrote %s", path)
+                    counter += 1
         return io.NodeOutput(ui=UI.SavedAudios(results))
 
 
@@ -422,6 +616,7 @@ class RoformerInfo(io.ComfyNode):
 NODE_CLASS_MAPPINGS = {
     "RoformerLoader": RoformerLoader,
     "RoformerSeparate": RoformerSeparate,
+    "RoformerEnsemble": RoformerEnsemble,
     "RoformerToAudio": RoformerToAudio,
     "CustomRoformerToAudio": CustomRoformerToAudio,
     "RoformerSaveAudio": RoformerSaveAudio,
@@ -430,6 +625,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RoformerLoader": "Roformer Loader",
     "RoformerSeparate": "Roformer Separate",
+    "RoformerEnsemble": "Roformer Ensemble",
     "RoformerToAudio": "Roformer To Audio",
     "CustomRoformerToAudio": "Custom Roformer To Audio",
     "RoformerSaveAudio": "Roformer Save Audio",
