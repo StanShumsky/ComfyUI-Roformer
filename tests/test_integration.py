@@ -57,7 +57,7 @@ def test_sw6_structure(sw6):
     names = list(stems["stems"].keys())
     assert len(names) == 6 and {n.lower() for n in names} >= {"bass", "drums"}
     for name, w in stems["stems"].items():
-        assert w.shape == (2, int(4.0 * 44100)), name  # (C, N) in the payload; To Audio batches it
+        assert w.shape == (1, 2, int(4.0 * 44100)), name  # (B, C, N) in the payload; To Audio passes it through
         assert torch.isfinite(w).all() and w.dtype == torch.float32
     # the mix has no low content, so the bass stem must come back quiet - and everything is not silent
     assert float(stems["stems"]["bass"].abs().max()) < 0.01
@@ -82,7 +82,7 @@ def test_stems_reconstruct_the_mix(sw6):
     guarantee), within resampling tolerance."""
     payload, stems, target, other, info = sw6
     total = sum(w for w in stems["stems"].values())
-    src = synth_mix()["waveform"][0]  # (C, N)
+    src = synth_mix()["waveform"]  # (B, C, N) - the payload is batched
     assert total.shape == src.shape
     err = float((total - src).abs().max())
     assert err < 0.05, f"stems do not sum back to the input (max abs {err:.4f})"

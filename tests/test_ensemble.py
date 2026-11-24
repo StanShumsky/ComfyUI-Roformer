@@ -1,4 +1,4 @@
-"""Ensemble math (UVR-exact) and the Roformer Ensemble node: no weights, no network."""
+"""Ensemble math and the Roformer Ensemble node: no weights, no network."""
 import numpy as np
 import pytest
 import torch
@@ -15,7 +15,7 @@ def _noise(n=44100, seed=0):
     return torch.randn(1, n, generator=g)
 
 
-# --------------------------------------------------------------------- math: UVR exactness
+# --------------------------------------------------------------------- math: exactness
 
 def test_average_is_plain_mean():
     from roformernode.roformer import ensemble as E
@@ -27,7 +27,7 @@ def test_average_is_plain_mean():
 
 
 def test_max_min_spec_keeps_the_winner_verbatim():
-    """UVR's fold: per STFT bin the complex value of the larger- / smaller-magnitude input
+    """The fold: per STFT bin the complex value of the larger- / smaller-magnitude input
     wins (magnitude AND phase), and the blend is the istft of that chimeric spec. Two tones
     at different frequencies so both inputs win somewhere."""
     from roformernode.roformer import ensemble as E
@@ -58,7 +58,7 @@ def test_blend_geometry_round_trip():
 
 
 def test_blend_three_models_folds_pairwise():
-    """N models: UVR folds pairwise (acc = where(|x_i| >= |acc|, x_i, acc)) - exactly."""
+    """N models: the fold is pairwise (acc = where(|x_i| >= |acc|, x_i, acc)) - exactly."""
     from roformernode.roformer import ensemble as E
     torch.manual_seed(0)
     waves = [_noise(30000, i) for i in range(3)]
@@ -173,7 +173,7 @@ def test_ensemble_node_average(nodes, models_dir, tiny_model):
 
 def test_ensemble_node_max_spec_math(nodes, models_dir, tiny_model):
     """Through the node: the output is the istft of the per-bin chimeric spec - the
-    complex value of the larger-magnitude input wins at every bin (UVR's exact math)."""
+    complex value of the larger-magnitude input wins at every bin (the exact per-bin math)."""
     from roformernode.roformer import ensemble as E
     p1, p2, _ = _tiny_runs(nodes, models_dir)
     a1 = _payload_audio(nodes, p1)
@@ -223,7 +223,7 @@ def test_ensemble_node_aligns_shifted_input(nodes, models_dir, tiny_model):
     l = min(a1["waveform"].shape[-1], a2["waveform"].shape[-1])
     # Advancing the lagging input by the detected 200 samples restores the unshifted stem:
     # the expected average is (a1 + w2) over the first l-200 samples, and a1/2 over the
-    # shift's zero-filled tail (UVR's head-trim + zero-pad). A wrong detected offset would
+    # shift's zero-filled tail (head-trim + zero-pad). A wrong detected offset would
     # misalign the body and fail the allclose.
     expected = (a1["waveform"][0][:, :l] + E.shift_wave(lagged, 200, l)) / 2
     assert torch.allclose(aligned["waveform"][0][:, :l], expected, atol=1e-5)
@@ -268,7 +268,7 @@ def test_ensemble_schema_autogrow_and_widget_order(nodes):
                if not isinstance(i, nodes.io.DynamicInput) and not i.optional]
     assert [i.id for i in widgets] == ["algorithm", "normalize", "align",
                                        "align_max_seconds", "invert", "n_fft"]
-    assert next(i for i in widgets if i.id == "n_fft").default == 2048  # UVR's geometry
+    assert next(i for i in widgets if i.id == "n_fft").default == 2048  # the 2048/1024 STFT geometry
 
 
 def test_save_audio_normalize_and_batch(nodes, output_dir, models_dir, tiny_model):

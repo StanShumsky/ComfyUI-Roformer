@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-roformer"
-description = "Music source separation nodes for 41 popular RoFormer checkpoints on Hugging Face (the 13 pcunwa releases plus community releases): custom loader, chunked inference, UVR-exact ensemble blending (max spec / min spec / average, exact residual), batched inputs and saving."
-version = "0.4.0"
+description = "Music source separation nodes for 41 popular RoFormer checkpoints on Hugging Face (the 13 pcunwa releases plus community releases): custom loader, chunked inference, per-bin ensemble blending (max spec / min spec / average, exact residual), audio tools (Align, Pitch Shift, Time Stretch, Key Detect), batched inputs and saving."
+version = "1.0.0"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [

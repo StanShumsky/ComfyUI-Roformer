@@ -3,7 +3,7 @@
 The whole pack registers through the V3 entrypoint below. ComfyUI's loader registers a custom
 node module as either V1 (NODE_CLASS_MAPPINGS) or V3 (comfy_entrypoint) - it checks V1 first
 and returns, so a module with both would silently lose its V3 nodes; this pack therefore has no
-NODE_CLASS_MAPPINGS of its own and registers everything here: the seven io.ComfyNode classes in
+NODE_CLASS_MAPPINGS of its own and registers everything here: the eleven io.ComfyNode classes in
 nodes.py.
 """
 from comfy_api.latest import ComfyExtension
@@ -19,6 +19,10 @@ class RoformerPack(ComfyExtension):
             nodes.RoformerLoader,
             nodes.RoformerSeparate,
             nodes.RoformerEnsemble,
+            nodes.RoformerAlign,
+            nodes.RoformerPitchShift,
+            nodes.RoformerTimeStretch,
+            nodes.RoformerKeyDetect,
             nodes.RoformerToAudio,
             nodes.CustomRoformerToAudio,
             nodes.RoformerSaveAudio,

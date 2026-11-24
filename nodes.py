@@ -25,7 +25,7 @@ import comfy.model_management as mm
 from comfy.utils import ProgressBar
 from comfy_api.latest import io, UI
 
-from .roformer import ensemble
+from .roformer import align, audio_tools, ensemble
 from .roformer.audio_io import audio_to_tensor, resample, to_audio_payload
 from .roformer.loading import load_roformer, local_models
 from .roformer.manifest import MODELS
@@ -277,7 +277,7 @@ class RoformerSeparate(io.ComfyNode):
 
 
 class RoformerEnsemble(io.ComfyNode):
-    """Blend the same stem from 2-8 model runs with UVR's exact ensemble math."""
+    """Blend the same stem from 2-8 model runs (max spec / min spec / average, exact residual)."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -296,7 +296,7 @@ class RoformerEnsemble(io.ComfyNode):
                 "channel count. algorithm: 'max spec' keeps, per STFT bin, the value of the input with "
                 "the larger magnitude (phase included - the leaderboard choice for vocals); 'min spec' "
                 "the smaller one (suppresses leakage - the leaderboard choice for the instrumental); "
-                "'average' is a plain time-domain mean - exactly UVR's math (Hann 2048/1024 STFT). "
+                "'average' is a plain time-domain mean (Hann 2048/1024 STFT). "
                 "invert: exact residual - the output becomes mix minus the blend (connect the "
                 "original audio to mix): ensemble the vocals, subtract for the instrumental, and "
                 "blend + output == mix holds exactly. normalize: 'anti clip' scales a clipping blend "
@@ -323,8 +323,8 @@ class RoformerEnsemble(io.ComfyNode):
                                        "magnitude (keeps each model's most confident content - the "
                                        "leaderboard choice for vocals). min spec: the smaller "
                                        "magnitude (suppresses leakage - the leaderboard choice for the "
-                                       "instrumental). average: plain time-domain mean. Same math as "
-                                       "UVR's ensemble (Hann 2048/1024 STFT, phase preserved)."),
+                                       "instrumental). average: plain time-domain mean. Phase is "
+                                       "preserved throughout (Hann 2048/1024 STFT)."),
                 io.Combo.Input("normalize", options=list(ensemble.NORMALIZE_MODES), default="off",
                                tooltip="off: as-is. anti clip: if the blend clips (peak above 1.0) scale "
                                        "it back to full scale - never raises a quiet result. full "
@@ -338,8 +338,8 @@ class RoformerEnsemble(io.ComfyNode):
                                          "(two runs of this pack always are)."),
                 io.Float.Input("align_max_seconds", default=1.0, min=0.0625, max=2.0, step=0.0625,
                                advanced=True,
-                               tooltip="Search radius for align, in seconds (0.0625-2, the UVR "
-                                       "alignment window). Only read when align is on."),
+                               tooltip="Search radius for align, in seconds (0.0625-2). Only read "
+                                       "when align is on."),
                 io.Boolean.Input("invert", default=False,
                                  tooltip="Exact residual: the output becomes mix minus the blend "
                                          "(connect the original audio to the mix input). The "
@@ -350,7 +350,7 @@ class RoformerEnsemble(io.ComfyNode):
                                        "on; ignored otherwise."),
                 io.Int.Input("n_fft", default=2048, min=512, max=8192, step=512, advanced=True,
                              tooltip="STFT window for the spectral algorithms (hop = half of it). "
-                                     "2048/1024 is what UVR and the mvsep winners use; leave it."),
+                                     "2048/1024 is what the mvsep winners use; leave it."),
             ],
             outputs=[
                 io.Audio.Output(id="audio", display_name="audio",
@@ -425,6 +425,279 @@ class RoformerEnsemble(io.ComfyNode):
                     algorithm, len(waves), y.shape[-1], rate,
                     ", exact residual" if invert else "", )
         return io.NodeOutput(to_audio_payload(y, rate))
+
+
+class RoformerAlign(io.ComfyNode):
+    """Align one recording to a reference - for cross-session ensembling and A/B."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="RoformerAlign",
+            display_name="Roformer Align",
+            category=CATEGORY,
+            search_aliases=["align", "alignment", "offset", "sync", "time shift",
+                            "phase inversion", "leading silence", "manual ensemble"],
+            description=(
+                "Align one recording to a reference so two files from different sessions can be "
+                "ensembled or A/B'd. Connect "
+                "the reference (the track to align to, e.g. the original mix) and the input (the "
+                "track to be aligned): same sample rate, same channel count, one song each. phase: "
+                "'automatic' flips the input when it starts phase-inverted (a correlation check on "
+                "the first 1000 samples); 'positive' / 'negative' force a sign; 'native' leaves it. "
+                "match_silence: equalize the leading silence of the two first (for files trimmed "
+                "differently). intro_analysis: where the first cross-correlation pass samples its "
+                "1 s segments (default: one position at 1/10 of the length; 'shifts: *' try several "
+                "positions and keep every unique shift as a candidate). The advanced levers refine "
+                "the search: align_window slides a Hanning window and re-aligns per window (the "
+                "heavy path - the finer the window and the volume/phase grids, the slower); "
+                "volume_analysis tries gain corrections on the input (0-40 dB); phase_shifts tries "
+                "Hilbert phase rotations of the input. Outputs: aligned (the input aligned to the "
+                "reference - feed it to an Ensemble slot) and inverted (reference minus the "
+                "aligned input, the exact residual - the inverted track)."
+            ),
+            inputs=[
+                io.Audio.Input("reference", tooltip="The track to align to (e.g. the original mix, "
+                                                    "or the first model's run). One song."),
+                io.Audio.Input("input", tooltip="The track to be aligned (one song, the same sample "
+                                                "rate and channel count as the reference). Its "
+                                                "aligned form comes back on the aligned output."),
+                io.Combo.Input("phase", options=list(align.PHASE_OPTIONS), default="automatic",
+                               tooltip="automatic: flip the input if it starts phase-inverted (the "
+                                       "correlation check on the first 1000 samples). positive / "
+                                       "negative: force the sign. native: leave it as-is."),
+                io.Boolean.Input("match_silence", default=False,
+                                 tooltip="Equalize the leading silence of the two tracks first - "
+                                         "for files that were trimmed or exported differently. "
+                                         "Off: the cross-correlation search handles the offset."),
+                io.Combo.Input("intro_analysis", options=list(align.INTRO_OPTIONS), default="default",
+                               tooltip="Where the first alignment pass samples its 1 s segments: "
+                                       "default = one position (1/10 of the length); 1/8..1/2 = "
+                                       "that single fraction; shifts: low/medium/high = several "
+                                       "fractions - every unique shift becomes a candidate."),
+                io.Combo.Input("align_window", options=list(align.ALIGN_WINDOW_OPTIONS), default="off",
+                               advanced=True,
+                               tooltip="Per-window refinement: slide a Hanning window of this size "
+                                       "across the track and re-align inside every window (for "
+                                       "pairs with local timing drift). off = the global search "
+                                       "only (fast). The finer the window - and the volume / "
+                                       "phase grids below - the slower the run."),
+                io.Combo.Input("volume_analysis", options=list(align.VOLUME_OPTIONS), default="off",
+                               advanced=True,
+                               tooltip="Gain corrections to try on the input during the search: "
+                                       "off (none), low (0-7 dB in 1 dB steps), medium (0-11 dB "
+                                       "in 1 dB), high (0-12 dB in 0.5 dB), very high (0-20 dB in "
+                                       "0.5 dB - the largest grid, the slowest)."),
+                io.Combo.Input("phase_shifts", options=list(align.PHASE_SHIFT_OPTIONS), default="off",
+                               advanced=True,
+                               tooltip="Hilbert phase rotations of the input to try (in degrees): "
+                                       "off (none), or 180/90/45/20/10/1 = the step - smaller "
+                                       "steps try more rotations (1 tries all of them; the "
+                                       "largest grid, the slowest)."),
+            ],
+            outputs=[
+                io.Audio.Output(id="aligned", display_name="aligned",
+                                tooltip="The input aligned to the reference (gain- and phase- "
+                                        "corrected, offset-removed) - feed it to an Ensemble "
+                                        "slot next to the reference."),
+                io.Audio.Output(id="inverted", display_name="inverted",
+                                tooltip="Reference minus the aligned input (the inverted track) - "
+                                        "what the alignment removed, sample-exact."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, reference: dict, audio: dict, phase: str, match_silence: bool,
+                intro_analysis: str, align_window: str, volume_analysis: str,
+                phase_shifts: str) -> io.NodeOutput:
+        ref, rate = audio_to_tensor(reference)
+        wav, wrate = audio_to_tensor(audio)
+        if ref.shape[0] != 1:
+            raise ValueError(
+                f"Roformer Align: the reference is batched (B={ref.shape[0]}) - connect one song.")
+        if wav.shape[0] != 1:
+            raise ValueError(
+                f"Roformer Align: the input is batched (B={wav.shape[0]}) - connect one song.")
+        if wrate != rate:
+            raise ValueError(
+                f"Roformer Align: the sample rates differ ({rate} Hz vs {wrate} Hz) - resample one "
+                "of them first.")
+        if ref.shape[1] != wav.shape[1]:
+            raise ValueError(
+                f"Roformer Align: the channel counts differ ({ref.shape[1]} vs {wav.shape[1]}) - "
+                "connect stereo to stereo (or mono to mono).")
+        if min(ref.shape[-1], wav.shape[-1]) < rate:
+            raise ValueError("Roformer Align: both tracks need at least one second.")
+        ref, wav = ref[0], wav[0]
+        # phase handling
+        if phase == "automatic" and align.check_if_phase_inverted(ref, wav):
+            LOGGER.info("Roformer Align: the input starts phase-inverted; flipping it.")
+            wav = -wav
+        elif phase == "negative":
+            wav = -wav
+        if match_silence:
+            wav = align.adjust_leading_silence(wav, ref)
+        intro_divs = align.INTRO_MAP[intro_analysis]
+        windows = align.ALIGN_WINDOW_MAP[align_window]
+        base_db, db_range = align.VOLUME_MAP[volume_analysis]
+        phase_step = align.PHASE_SHIFT_MAP[phase_shifts]
+        variants = align.intro_align_variants(ref, wav, rate, intro_divs)
+        # progress: per window position (per channel) on the windowed path, per candidate on the global one
+        if windows:
+            total = sum(len(range(0, max(ref.shape[-1] - int(rate * secs) + 1, 1), int(rate * secs / 2)))
+                        * ref.shape[0] for secs in windows)
+        else:
+            total = len(variants) * len(db_range)
+        progress = ProgressBar(total)
+        with tqdm(total=total, desc="Roformer align") as tq:
+            def tick(n=1):
+                progress.update(n)
+                tq.update(n)
+            candidates: list[torch.Tensor] = []
+            for s in variants:
+                s = align.match_length(s, ref)
+                if windows:
+                    candidates.append(align.time_correction(ref, s, windows, (base_db, db_range),
+                                                            rate, phase_step, progress=tick))
+                else:
+                    subs = [ref - s * (10 ** ((base_db + db) / 20)) for db in db_range]
+                    candidates.extend(subs)
+                    tick(len(db_range))
+        final = (align.ensemble_wav(candidates, 240) if len(candidates) > 1
+                 else candidates[0])
+        sub = final.clamp(-1, 1)
+        aligned = ref - sub
+        LOGGER.info("Roformer Align: %d candidate shift(s), %d samples @ %d Hz -> aligned + "
+                    "inverted (residual RMS %.4f).", len(candidates), ref.shape[-1], rate,
+                    float(sub.pow(2).mean().sqrt()))
+        return io.NodeOutput(to_audio_payload(aligned, rate), to_audio_payload(sub, rate))
+
+
+class RoformerPitchShift(io.ComfyNode):
+    """Shift the pitch by semitones (phase vocoder or classic resample)."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="RoformerPitchShift",
+            display_name="Roformer Pitch Shift",
+            category=CATEGORY,
+            search_aliases=["pitch", "semitones", "transpose", "key", "rubber band"],
+            description=(
+                "Shift the audio's pitch by semitones (0.5 steps, -24 to +24) at its own sample "
+                "rate. time_correct (on): the pitch moves and the length stays - a phase-vocoder "
+                "pass; off: the classic resample - the pitch moves AND the length changes by "
+                "2 ** (-semitones / 12). A batched input shifts every element."),
+            inputs=[
+                io.Audio.Input("audio", tooltip="The audio to shift, any sample rate (stays at "
+                                                "its own rate). A batched (B, C, N) input "
+                                                "shifts every element."),
+                io.Float.Input("semitones", default=0.0, min=-24.0, max=24.0, step=0.5,
+                               tooltip="The pitch shift in semitones, 0.5 steps (12 = one octave "
+                                       "up; -12 = one octave down)."),
+                io.Boolean.Input("time_correct", default=True,
+                                 tooltip="on: phase-vocoder shift - the pitch moves, the length "
+                                         "stays. off: the resample path - the pitch moves and the "
+                                         "length changes too."),
+            ],
+            outputs=[
+                io.Audio.Output(id="audio", display_name="audio",
+                                tooltip="The shifted audio at the input's own sample rate."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio: dict, semitones: float, time_correct: bool = True) -> io.NodeOutput:
+        wave, rate = audio_to_tensor(audio)
+        out = [audio_tools.pitch_shift(wave[b], rate, semitones, time_correct)
+               for b in range(wave.shape[0])]
+        y = torch.stack(out)
+        LOGGER.info("Roformer Pitch Shift: %.1f semitone(s) over %d song(s), %d samples @ %d Hz%s.",
+                    semitones, wave.shape[0], y.shape[-1], rate,
+                    ", time-corrected" if time_correct else ", length changed")
+        return io.NodeOutput(to_audio_payload(y, rate))
+
+
+class RoformerTimeStretch(io.ComfyNode):
+    """Stretch the tempo without changing the pitch (phase vocoder)."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="RoformerTimeStretch",
+            display_name="Roformer Time Stretch",
+            category=CATEGORY,
+            search_aliases=["tempo", "time", "stretch", "speed", "slow down", "speed up"],
+            description=(
+                "Stretch the audio's tempo without changing its pitch at its own sample rate (a "
+                "phase-vocoder pass). rate: 1.0 = as-is, "
+                "> 1 = faster / shorter (2.0 = half the length), < 1 = slower / longer. A batched "
+                "input stretches every element."),
+            inputs=[
+                io.Audio.Input("audio", tooltip="The audio to stretch, any sample rate (stays at "
+                                                "its own rate). A batched (B, C, N) input "
+                                                "stretches every element."),
+                io.Float.Input("rate", default=1.0, min=0.25, max=4.0, step=0.05,
+                               tooltip="The tempo factor: 2.0 = twice as fast (half the length), "
+                                       "0.5 = half speed (double the length). The pitch is "
+                                       "preserved."),
+            ],
+            outputs=[
+                io.Audio.Output(id="audio", display_name="audio",
+                                tooltip="The stretched audio at the input's own sample rate."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio: dict, rate: float = 1.0) -> io.NodeOutput:
+        wave, sr = audio_to_tensor(audio)
+        out = [audio_tools.time_stretch(wave[b], sr, rate) for b in range(wave.shape[0])]
+        y = torch.stack(out)
+        LOGGER.info("Roformer Time Stretch: x%.2f over %d song(s), %d -> %d samples @ %d Hz.",
+                    rate, wave.shape[0], wave.shape[-1], y.shape[-1], sr)
+        return io.NodeOutput(to_audio_payload(y, sr))
+
+
+class RoformerKeyDetect(io.ComfyNode):
+    """The musical key of the audio (chroma + Krumhansl-Schmuckler profile match)."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="RoformerKeyDetect",
+            display_name="Roformer Key Detect",
+            category=CATEGORY,
+            search_aliases=["key", "key detection", "tonality", "major", "minor"],
+            description=(
+                "Detect the musical key of the audio: the mean chroma pitch-class profile "
+                "correlated against all 24 Krumhansl-Schmuckler key profiles (major and minor at "
+                "every tonic). Feed it the separated "
+                "vocals (the clearest tonal source) rather than the full mix when you have them. "
+                "Output: a string like 'A minor (confidence 0.72)' - the confidence is the best "
+                "correlation (0.5-0.9 is typical on clean vocals; below about 0.5 the audio is "
+                "tonally ambiguous). One song per input; a batched input is detected on its "
+                "first element."),
+            inputs=[
+                io.Audio.Input("audio", tooltip="The audio to analyse (ideally the separated "
+                                                "vocals). One song."),
+            ],
+            outputs=[
+                io.String.Output(id="key", display_name="key",
+                                 tooltip="The detected key and its confidence, e.g. 'A minor "
+                                         "(confidence 0.72)'."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio: dict) -> io.NodeOutput:
+        wave, rate = audio_to_tensor(audio)
+        if wave.shape[0] > 1:
+            LOGGER.info("Roformer Key Detect: %d-song batch - detecting the first element.",
+                        wave.shape[0])
+        key, conf = audio_tools.detect_key(wave[0], rate)
+        LOGGER.info("Roformer Key Detect: %s (r=%.3f) over %.1f s @ %d Hz.",
+                    key, conf, wave[0].shape[-1] / rate, rate)
+        return io.NodeOutput(f"{key} (confidence {conf:.2f})")
 
 
 AUTO_STEM = "(auto)"
@@ -617,6 +890,10 @@ NODE_CLASS_MAPPINGS = {
     "RoformerLoader": RoformerLoader,
     "RoformerSeparate": RoformerSeparate,
     "RoformerEnsemble": RoformerEnsemble,
+    "RoformerAlign": RoformerAlign,
+    "RoformerPitchShift": RoformerPitchShift,
+    "RoformerTimeStretch": RoformerTimeStretch,
+    "RoformerKeyDetect": RoformerKeyDetect,
     "RoformerToAudio": RoformerToAudio,
     "CustomRoformerToAudio": CustomRoformerToAudio,
     "RoformerSaveAudio": RoformerSaveAudio,
@@ -626,6 +903,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RoformerLoader": "Roformer Loader",
     "RoformerSeparate": "Roformer Separate",
     "RoformerEnsemble": "Roformer Ensemble",
+    "RoformerAlign": "Roformer Align",
+    "RoformerPitchShift": "Roformer Pitch Shift",
+    "RoformerTimeStretch": "Roformer Time Stretch",
+    "RoformerKeyDetect": "Roformer Key Detect",
     "RoformerToAudio": "Roformer To Audio",
     "CustomRoformerToAudio": "Custom Roformer To Audio",
     "RoformerSaveAudio": "Roformer Save Audio",

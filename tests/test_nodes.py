@@ -13,8 +13,9 @@ def test_node_schemas(nodes):
     """V3: every node's schema (node_id / display name / category / description / io ids) is consistent."""
     assert set(nodes.NODE_CLASS_MAPPINGS) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS)
     assert set(nodes.NODE_CLASS_MAPPINGS) == {
-        "RoformerLoader", "RoformerSeparate", "RoformerEnsemble", "RoformerToAudio",
-        "CustomRoformerToAudio", "RoformerSaveAudio", "RoformerInfo",
+        "RoformerLoader", "RoformerSeparate", "RoformerEnsemble", "RoformerAlign",
+        "RoformerPitchShift", "RoformerTimeStretch", "RoformerKeyDetect",
+        "RoformerToAudio", "CustomRoformerToAudio", "RoformerSaveAudio", "RoformerInfo",
     }
     categories = set()
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():

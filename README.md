@@ -6,7 +6,9 @@ ComfyUI nodes for 41 of the popular RoFormer music source-separation models: 6-s
 lossless WAV/FLAC files or as live `AUDIO` you can feed into any other node. All models
 run at 44.1 kHz stereo. The **Roformer Ensemble** node blends the same stem from several
 model runs into one better stem — the recipe behind the top [mvsep.com](https://mvsep.com/quality_checker/multisong_leaderboard)
-leaderboard results — and a batched audio input separates every element at once.
+leaderboard results — and a batched audio input separates every element at once. Beyond
+the models, four audio-tool nodes round out the workflow: **Align** (cross-session
+alignment with the exact residual), **Pitch Shift**, **Time Stretch**, and **Key Detect**.
 
 ## Install
 
@@ -122,6 +124,67 @@ ensemble: every slot, algorithm and option is in the workflow file.
 ensemble (**average** + `invert`, mix connected) subtracts them from the mix for the
 exact-residual instrumental.
 
+### Roformer Align
+Aligns one recording to a reference so two files from different sessions (different
+takes, trims, or tools) can be ensembled or A/B'd. Connect the **reference** (the track
+to align to, e.g. the original mix or the first model's run) and the **input** (the
+track to be aligned): one song each, the same sample rate and channel count, at least
+one second. The search runs the phase check, a cross-correlation pass over several
+candidate shifts, and an optional per-window refinement, then keeps the candidate with
+the quietest residual. Outputs: **aligned** (the input with the offset removed and the
+gain / phase corrected — feed it to an Ensemble slot next to the reference) and
+**inverted** (reference minus the aligned input — what the alignment removed,
+sample-exact).
+- `reference` — the track to align to (e.g. the original mix, or the first model's run).
+- `input` — the track to be aligned (same sample rate and channel count as the
+  reference).
+- `phase` — `automatic` (default): flip the input if it starts phase-inverted (the
+  correlation check on the first 1000 samples); `positive` / `negative` force the sign;
+  `native` leaves it as-is.
+- `match_silence` — equalize the leading silence of the two tracks first (for files
+  trimmed or exported differently). Off: the cross-correlation search handles the
+  offset.
+- `intro_analysis` — where the first alignment pass samples its 1 s segments:
+  `default` (one position at 1/10 of the length), `1/8`…`1/2` (that single fraction),
+  `shifts: low` / `medium` / `high` (several fractions — every unique shift becomes a
+  candidate).
+- Advanced (each one refines the search — and slows it down):
+  - `align_window` — `off` (the global search only — fast) or a Hanning window size
+    (`0.0625 s`…`2 s`, or `shifts: low / medium / high` for several sizes): the track is
+    re-aligned inside every sliding window — for pairs with local timing drift.
+  - `volume_analysis` — gain corrections tried on the input: `off` (none), `low`
+    (0–7 dB in 1 dB steps), `medium` (0–11 dB in 1 dB), `high` (0–12 dB in 0.5 dB),
+    `very high` (0–20 dB in 0.5 dB — the largest grid, the slowest).
+  - `phase_shifts` — Hilbert phase rotations tried on the input, in degrees: `off`
+    (none), or `180`…`1` as the step (smaller step = more rotations; `1` tries all of
+    them — the largest grid, the slowest).
+
+### Roformer Pitch Shift
+Shifts the pitch by semitones at the audio's own sample rate. A batched input shifts
+every element.
+- `audio` — the audio to shift, any sample rate (stays at its own rate).
+- `semitones` — the shift in semitones, 0.5 steps, −24…+24 (default 0; 12 = one octave
+  up, −12 = one octave down).
+- `time_correct` — on (default): a phase-vocoder pass — the pitch moves, the length
+  stays; off: the classic resample — the pitch moves AND the length changes by
+  2^(−semitones/12).
+
+### Roformer Time Stretch
+Stretches the tempo without changing the pitch, at the audio's own sample rate (a
+phase-vocoder pass). A batched input stretches every element.
+- `audio` — the audio to stretch, any sample rate (stays at its own rate).
+- `rate` — the tempo factor (default 1.0, 0.25–4.0): 2.0 = twice as fast (half the
+  length), 0.5 = half speed (double the length). The pitch is preserved.
+
+### Roformer Key Detect
+Detects the musical key: the mean chroma pitch-class profile correlated against all 24
+Krumhansl–Schmuckler key profiles (major and minor at every tonic).
+- `audio` — the audio to analyse; feed it the separated vocals (the clearest tonal
+  source) when you have them rather than the full mix. A batched input is detected on
+  its first element (logged).
+- Output `key` — a string like `A minor (confidence 0.72)`: 0.5–0.9 is typical on clean
+  vocals; below about 0.5 the audio is tonally ambiguous.
+
 ### Roformer To Audio
 Extracts one stem from a stems payload as `AUDIO` for feeding any other node. A batched
 payload comes back batched. `stem` is a
@@ -236,6 +299,49 @@ Single-task fine-tunes the generic separators don't cover.
 
 Stem names come from each model's training config, so the list above is exactly what you
 get — for the multi-stem models pick any of the stems with Roformer To Audio.
+
+## Blueprints
+
+### Two-model ensemble (the leaderboard recipe)
+`example_workflows/roformer_ensemble.json` — the mix runs through `sw-6stem` and
+`hyperace-v2-voc`, **max spec** blends the two vocals, and a second ensemble (**average**
++ `invert`, the mix connected) subtracts them from the mix for the exact-residual
+instrumental. Two-model blends are what the mvsep top entries are.
+
+### Manual ensemble (mvsep.com submissions)
+The board-climb pipeline: the same track through several models, the same stem blended,
+the blend resubmitted. Save every run's output with the mvsep submission naming —
+`{n}_{track}_{stem}` (`n` = the track number: `1_mysong_vocals.wav`,
+`2_mysong_instrum.wav`) — as **Roformer Save Audio**'s `filename_prefix`. Then blend
+either here or in an external manual-ensemble tool:
+- **In this graph:** **Load Audio** (one model's file per stem) → **Roformer Align**
+  (only when the files come from different sessions or trims — two runs of this pack are
+  sample-accurate) → **Roformer Ensemble** (`max spec` for the target stem, `min spec`
+  for the residual, `invert` + the mix for the exact complement) → **Roformer Save
+  Audio** with the same `{n}_{track}_{stem}` prefix.
+- **In an external tool:** the same `{n}_{track}_{stem}` WAVs drop straight into a
+  manual-ensemble bulk mode — it groups files by the leading track number and blends
+  each track (one stem per track). The naming is the contract: the same files work in
+  both.
+
+### Reverb removal
+Load **`dereverb`** (anvuew's de-reverberation model, [Models](#models)) → **Roformer
+Separate** on the roomy vocal → **Roformer To Audio** (the model's target, `noreverb`) —
+or save it. The model splits the input into the dry `noreverb` component and the
+`reverb` component; the wet part is the other stem, if you want it.
+
+## Feature coverage (RoFormer scope)
+
+Every RoFormer-relevant feature of the standard separation workflow has a home in this
+pack: the 41-checkpoint model lineup, per-stem extraction (To Audio / Custom),
+enhancement chains (the graph itself — To Audio feeds another Separate), device policy
+(`auto` = the session's auxiliary-model policy; the weights ride in RAM and are evicted
+per run), OOM resilience (the auto half-window retry — not a "lower the segment size"
+message), output naming (prefix subfolders, per-stem files, no overwrites, files linked
+on the node), ensembling (max / min spec / average, exact residual, TTA, 2–8 inputs —
+the mvsep-winning recipes), the audio tools (Align, Pitch Shift, Time Stretch, Key
+Detect), and settings persistence (the workflow graph is the recipe). Out of scope, by
+design: Demucs / MDX-Net / MDX23 / RVB (other architecture families).
 
 ## Tests
 

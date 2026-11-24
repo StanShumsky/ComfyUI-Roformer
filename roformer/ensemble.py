@@ -1,12 +1,12 @@
-"""UVR-style ensemble math: blend the same stem from N model runs.
+"""Ensemble math: blend the same stem from N model runs.
 
-The three algorithms reproduce UVR's ensemble exactly - per-STFT-bin magnitude
-selection that keeps the winning input's complex value (phase included) for max spec /
-min spec, a plain time-domain mean for average - with UVR's STFT geometry (Hann window,
-n_fft 2048, hop n_fft // 2, centred). The companions are the levers the mvsep.com
-winners use around the blend: a deterministic time-offset alignment search (for inputs
-from different processing paths), anti-clip / full-scale normalization, and the exact
-(time-domain) residual - mix minus blend, so stem + output == mix exactly.
+The three algorithms: per-STFT-bin magnitude selection that keeps the winning input's
+complex value (phase included) for max spec / min spec, a plain time-domain mean for
+average - the STFT geometry is Hann, n_fft 2048, hop n_fft // 2, centred. The
+companions are the levers the mvsep.com winners use around the blend: a deterministic
+time-offset alignment search (for inputs from different processing paths), anti-clip /
+full-scale normalization, and the exact (time-domain) residual - mix minus blend, so
+stem + output == mix exactly.
 """
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ NORMALIZE_MODES = ("off", "anti clip", "full scale")
 
 def _hann(n_fft: int, device) -> torch.Tensor:
     # periodic Hann = scipy.get_window('hann', n_fft, fftbins=True) = what librosa's default
-    # 'hann' is (torch.stft's window=None would be a rectangular window - not UVR's geometry)
+    # 'hann' is (torch.stft's window=None would be a rectangular window - not this geometry)
     return torch.hann_window(n_fft, periodic=True, device=device)
 
 
 def stft_spec(wave: torch.Tensor, n_fft: int) -> torch.Tensor:
-    """(C, T) float32 -> complex (C, F, frames). Hann, hop n_fft // 2, centred - the same
-    geometry as UVR's librosa.stft(n_fft=2048, hop_length=1024)."""
+    """(C, T) float32 -> complex (C, F, frames). Hann, hop n_fft // 2, centred - the
+    standard librosa.stft(n_fft=2048, hop_length=1024) geometry."""
     return torch.stft(wave, n_fft, hop_length=n_fft // 2, win_length=n_fft,
                       window=_hann(n_fft, wave.device), return_complex=True)
 
@@ -38,9 +38,9 @@ def istft_spec(spec: torch.Tensor, n_fft: int, length: int) -> torch.Tensor:
 def blend(algorithm: str, waves: list[torch.Tensor], n_fft: int, length: int) -> torch.Tensor:
     """Blend N (C, T) stems (same channel count) to (C, length).
 
-    average: time-domain mean. max spec / min spec: UVR's per-bin magnitude selection in
+    average: time-domain mean. max spec / min spec: the per-bin magnitude selection in
     the STFT domain - at every bin the complex value of the input with the larger /
-    smaller magnitude wins (folded pairwise, exactly UVR's np.where math)."""
+    smaller magnitude wins (folded pairwise, a per-bin np.where)."""
     if algorithm not in ALGORITHMS:
         raise ValueError(
             f"Unknown ensemble algorithm {algorithm!r}: use one of {', '.join(ALGORITHMS)} (the algorithm widget)."
