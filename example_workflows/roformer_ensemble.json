@@ -1,698 +1,669 @@
 {
-  "id": "roformer-two-model-ensemble",
-  "revision": 0,
-  "last_node_id": 14,
-  "last_link_id": 15,
-  "nodes": [
+ "id": "roformer-two-model-ensemble",
+ "revision": 0,
+ "last_node_id": 14,
+ "last_link_id": 15,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "MarkdownNote",
+   "pos": [
+    -620,
+    40
+   ],
+   "size": [
+    460,
+    560
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "## Roformer \\u2014 Two-Model Ensemble (the mvsep.com leaderboard move)\n\nThe best mvsep.com results are **ensembles**: several models run on the same song, their stems blended. Two levers do most of the work:\n\n- **Max Spec / Min Spec** (the exact per-bin math): per STFT bin, keep the value of the model with the larger / smaller magnitude (phase included). Leaderboard recipe: **max spec for vocals, min spec for the instrumental**.\n- **Exact residual**: instead of trusting a model's predicted instrumental, compute `mix \\u2212 ensemble(vocals)` \\u2014 the split is exact (ensemble + residual == mix).\n\n**This graph**\n1. The mix runs through **two models**: `sw-6stem` (six stems) and `hyperace-v2-voc` (vocals + residual).\n2. **Roformer Ensemble (max spec)** blends the two vocals predictions.\n3. **Roformer Ensemble (invert, mix connected)** blends the two vocals (average) and subtracts them from the original mix \\u2014 the exact-residual instrumental.\n4. Saves: both ensemble stems (native Save Audio) and all six `sw-6stem` stems (Roformer Save Audio).\n\nAdd more models: another Loader + Separate + To Audio into the Ensemble's next audio slot (up to eight). The graph is the saved ensemble \\u2014 every slot and option is in the file.\n\nGPU strongly recommended; `sw-6stem` wants about 10 GB of VRAM."
+   ],
+   "title": "Roformer — Two-Model Ensemble"
+  },
+  {
+   "id": 2,
+   "type": "LoadAudio",
+   "pos": [
+    0,
+    40
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
     {
-      "id": 1,
-      "type": "MarkdownNote",
-      "pos": [
-        -620,
-        40
-      ],
-      "size": [
-        460,
-        560
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "## Roformer \\u2014 Two-Model Ensemble (the mvsep.com leaderboard move)\n\nThe best mvsep.com results are **ensembles**: several models run on the same song, their stems blended. Two levers do most of the work:\n\n- **Max Spec / Min Spec** (UVR's exact math): per STFT bin, keep the value of the model with the larger / smaller magnitude (phase included). Leaderboard recipe: **max spec for vocals, min spec for the instrumental**.\n- **Exact residual**: instead of trusting a model's predicted instrumental, compute `mix \\u2212 ensemble(vocals)` \\u2014 the split is exact (ensemble + residual == mix).\n\n**This graph**\n1. The mix runs through **two models**: `sw-6stem` (six stems) and `hyperace-v2-voc` (vocals + residual).\n2. **Roformer Ensemble (max spec)** blends the two vocals predictions.\n3. **Roformer Ensemble (invert, mix connected)** blends the two vocals (average) and subtracts them from the original mix \\u2014 the exact-residual instrumental.\n4. Saves: both ensemble stems (native Save Audio) and all six `sw-6stem` stems (Roformer Save Audio).\n\nAdd more models: another Loader + Separate + To Audio into the Ensemble's next audio slot (up to eight). The graph is the saved ensemble \\u2014 every slot and option is in the file.\n\nGPU strongly recommended; `sw-6stem` wants about 10 GB of VRAM."
-      ],
-      "title": "Roformer \u2014 Two-Model Ensemble"
-    },
-    {
-      "id": 2,
-      "type": "LoadAudio",
-      "pos": [
-        0,
-        40
-      ],
-      "size": [
-        320,
-        100
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            1,
-            2,
-            12
-          ]
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        ""
-      ]
-    },
-    {
-      "id": 3,
-      "type": "RoformerLoader",
-      "pos": [
-        0,
-        220
-      ],
-      "size": [
-        320,
-        100
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "ROFORMER_MODEL",
-          "links": [
-            3
-          ]
-        },
-        {
-          "name": "stems",
-          "type": "STRING",
-          "links": []
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "sw-6stem",
-        "auto"
-      ]
-    },
-    {
-      "id": 4,
-      "type": "RoformerLoader",
-      "pos": [
-        0,
-        400
-      ],
-      "size": [
-        320,
-        100
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "ROFORMER_MODEL",
-          "links": [
-            4
-          ]
-        },
-        {
-          "name": "stems",
-          "type": "STRING",
-          "links": []
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "hyperace-v2-voc",
-        "auto"
-      ]
-    },
-    {
-      "id": 5,
-      "type": "RoformerSeparate",
-      "pos": [
-        420,
-        180
-      ],
-      "size": [
-        320,
-        140
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "ROFORMER_MODEL",
-          "link": 3
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 1
-        }
-      ],
-      "outputs": [
-        {
-          "name": "stems",
-          "type": "ROFORMER_STEMS",
-          "links": [
-            5,
-            6
-          ]
-        },
-        {
-          "name": "target",
-          "type": "AUDIO",
-          "links": []
-        },
-        {
-          "name": "other",
-          "type": "AUDIO",
-          "links": []
-        },
-        {
-          "name": "info_json",
-          "type": "STRING",
-          "links": []
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        0,
-        false
-      ]
-    },
-    {
-      "id": 6,
-      "type": "RoformerSeparate",
-      "pos": [
-        420,
-        380
-      ],
-      "size": [
-        320,
-        140
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "ROFORMER_MODEL",
-          "link": 4
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 2
-        }
-      ],
-      "outputs": [
-        {
-          "name": "stems",
-          "type": "ROFORMER_STEMS",
-          "links": [
-            7
-          ]
-        },
-        {
-          "name": "target",
-          "type": "AUDIO",
-          "links": []
-        },
-        {
-          "name": "other",
-          "type": "AUDIO",
-          "links": []
-        },
-        {
-          "name": "info_json",
-          "type": "STRING",
-          "links": []
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        0,
-        false
-      ]
-    },
-    {
-      "id": 7,
-      "type": "RoformerToAudio",
-      "pos": [
-        840,
-        180
-      ],
-      "size": [
-        320,
-        70
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "stems",
-          "type": "ROFORMER_STEMS",
-          "link": 5
-        }
-      ],
-      "outputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            8,
-            10
-          ]
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "vocals"
-      ]
-    },
-    {
-      "id": 8,
-      "type": "RoformerToAudio",
-      "pos": [
-        840,
-        380
-      ],
-      "size": [
-        320,
-        70
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "stems",
-          "type": "ROFORMER_STEMS",
-          "link": 7
-        }
-      ],
-      "outputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            9,
-            11
-          ]
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "vocals"
-      ]
-    },
-    {
-      "id": 9,
-      "type": "RoformerEnsemble",
-      "pos": [
-        1260,
-        180
-      ],
-      "size": [
-        320,
-        165
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio0",
-          "type": "AUDIO",
-          "link": 8
-        },
-        {
-          "name": "audio1",
-          "type": "AUDIO",
-          "link": 9
-        },
-        {
-          "name": "audio2",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio3",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio4",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio5",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio6",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio7",
-          "type": "AUDIO"
-        },
-        {
-          "name": "mix",
-          "type": "AUDIO"
-        }
-      ],
-      "outputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            13,
-            15
-          ]
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "max spec",
-        "off",
-        false,
-        1.0,
-        false,
-        2048
-      ],
-      "title": "Vocals (max spec)"
-    },
-    {
-      "id": 10,
-      "type": "RoformerEnsemble",
-      "pos": [
-        1260,
-        420
-      ],
-      "size": [
-        320,
-        165
-      ],
-      "flags": {},
-      "order": 9,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio0",
-          "type": "AUDIO",
-          "link": 10
-        },
-        {
-          "name": "audio1",
-          "type": "AUDIO",
-          "link": 11
-        },
-        {
-          "name": "audio2",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio3",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio4",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio5",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio6",
-          "type": "AUDIO"
-        },
-        {
-          "name": "audio7",
-          "type": "AUDIO"
-        },
-        {
-          "name": "mix",
-          "type": "AUDIO",
-          "link": 12
-        }
-      ],
-      "outputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            14
-          ]
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "average",
-        "off",
-        false,
-        1.0,
-        true,
-        2048
-      ],
-      "title": "Instrumental (exact residual)"
-    },
-    {
-      "id": 11,
-      "type": "SaveAudio",
-      "pos": [
-        1680,
-        60
-      ],
-      "size": [
-        320,
-        100
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 13
-        }
-      ],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "roformer/ensemble/vocals",
-        "file"
-      ]
-    },
-    {
-      "id": 14,
-      "type": "PreviewAudio",
-      "pos": [
-        1680,
-        220
-      ],
-      "size": [
-        320,
-        100
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 15
-        }
-      ],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": []
-    },
-    {
-      "id": 12,
-      "type": "SaveAudio",
-      "pos": [
-        1680,
-        400
-      ],
-      "size": [
-        320,
-        100
-      ],
-      "flags": {},
-      "order": 12,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 14
-        }
-      ],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "roformer/ensemble/instrumental_exact",
-        "file"
-      ]
-    },
-    {
-      "id": 13,
-      "type": "RoformerSaveAudio",
-      "pos": [
-        420,
-        580
-      ],
-      "size": [
-        320,
-        130
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "stems",
-          "type": "ROFORMER_STEMS",
-          "link": 6
-        }
-      ],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "roformer/stems_sw6stem",
-        "wav",
-        "off"
-      ]
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [
+      1,
+      2,
+      12
+     ]
     }
+   ],
+   "properties": {},
+   "widgets_values": [
+    ""
+   ]
+  },
+  {
+   "id": 3,
+   "type": "RoformerLoader",
+   "pos": [
+    0,
+    220
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "model",
+     "type": "ROFORMER_MODEL",
+     "links": [
+      3
+     ]
+    },
+    {
+     "name": "stems",
+     "type": "STRING",
+     "links": []
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    "sw-6stem",
+    "auto"
+   ]
+  },
+  {
+   "id": 4,
+   "type": "RoformerLoader",
+   "pos": [
+    0,
+    400
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "model",
+     "type": "ROFORMER_MODEL",
+     "links": [
+      4
+     ]
+    },
+    {
+     "name": "stems",
+     "type": "STRING",
+     "links": []
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    "hyperace-v2-voc",
+    "auto"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "RoformerSeparate",
+   "pos": [
+    420,
+    180
+   ],
+   "size": [
+    320,
+    140
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "ROFORMER_MODEL",
+     "link": 3
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "stems",
+     "type": "ROFORMER_STEMS",
+     "links": [
+      5,
+      6
+     ]
+    },
+    {
+     "name": "target",
+     "type": "AUDIO",
+     "links": []
+    },
+    {
+     "name": "other",
+     "type": "AUDIO",
+     "links": []
+    },
+    {
+     "name": "info_json",
+     "type": "STRING",
+     "links": []
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    0,
+    false
+   ]
+  },
+  {
+   "id": 6,
+   "type": "RoformerSeparate",
+   "pos": [
+    420,
+    380
+   ],
+   "size": [
+    320,
+    140
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "ROFORMER_MODEL",
+     "link": 4
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 2
+    }
+   ],
+   "outputs": [
+    {
+     "name": "stems",
+     "type": "ROFORMER_STEMS",
+     "links": [
+      7
+     ]
+    },
+    {
+     "name": "target",
+     "type": "AUDIO",
+     "links": []
+    },
+    {
+     "name": "other",
+     "type": "AUDIO",
+     "links": []
+    },
+    {
+     "name": "info_json",
+     "type": "STRING",
+     "links": []
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    0,
+    false
+   ]
+  },
+  {
+   "id": 7,
+   "type": "RoformerToAudio",
+   "pos": [
+    840,
+    180
+   ],
+   "size": [
+    320,
+    70
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "stems",
+     "type": "ROFORMER_STEMS",
+     "link": 5
+    }
+   ],
+   "outputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [
+      8,
+      10
+     ]
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    "vocals"
+   ]
+  },
+  {
+   "id": 8,
+   "type": "RoformerToAudio",
+   "pos": [
+    840,
+    380
+   ],
+   "size": [
+    320,
+    70
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "stems",
+     "type": "ROFORMER_STEMS",
+     "link": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [
+      9,
+      11
+     ]
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    "vocals"
+   ]
+  },
+  {
+   "id": 9,
+   "type": "RoformerEnsemble",
+   "pos": [
+    1260,
+    180
+   ],
+   "size": [
+    320,
+    165
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audios.audio0",
+     "type": "AUDIO",
+     "link": 8
+    },
+    {
+     "name": "audios.audio1",
+     "type": "AUDIO",
+     "link": 9
+    },
+    {
+     "name": "audios.audio2",
+     "shape": 7,
+     "type": "AUDIO",
+     "link": null
+    },
+    {
+     "name": "mix",
+     "shape": 7,
+     "type": "AUDIO",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [
+      13,
+      15
+     ]
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    "max spec",
+    "off",
+    false,
+    1.0,
+    false,
+    2048
+   ],
+   "title": "Vocals (max spec)"
+  },
+  {
+   "id": 10,
+   "type": "RoformerEnsemble",
+   "pos": [
+    1260,
+    420
+   ],
+   "size": [
+    320,
+    165
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audios.audio0",
+     "type": "AUDIO",
+     "link": 10
+    },
+    {
+     "name": "audios.audio1",
+     "type": "AUDIO",
+     "link": 11
+    },
+    {
+     "name": "audios.audio2",
+     "shape": 7,
+     "type": "AUDIO",
+     "link": null
+    },
+    {
+     "name": "mix",
+     "shape": 7,
+     "type": "AUDIO",
+     "link": 12
+    }
+   ],
+   "outputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [
+      14
+     ]
+    }
+   ],
+   "properties": {},
+   "widgets_values": [
+    "average",
+    "off",
+    false,
+    1.0,
+    true,
+    2048
+   ],
+   "title": "Instrumental (exact residual)"
+  },
+  {
+   "id": 11,
+   "type": "SaveAudio",
+   "pos": [
+    1680,
+    60
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 13
+    }
+   ],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "roformer/ensemble/vocals",
+    "file"
+   ]
+  },
+  {
+   "id": 14,
+   "type": "PreviewAudio",
+   "pos": [
+    1680,
+    220
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 15
+    }
+   ],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": []
+  },
+  {
+   "id": 12,
+   "type": "SaveAudio",
+   "pos": [
+    1680,
+    400
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 14
+    }
+   ],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "roformer/ensemble/instrumental_exact",
+    "file"
+   ]
+  },
+  {
+   "id": 13,
+   "type": "RoformerSaveAudio",
+   "pos": [
+    420,
+    580
+   ],
+   "size": [
+    320,
+    130
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "stems",
+     "type": "ROFORMER_STEMS",
+     "link": 6
+    }
+   ],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "roformer/stems_sw6stem",
+    "wav",
+    "off"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   2,
+   0,
+   5,
+   1,
+   "AUDIO"
   ],
-  "links": [
-    [
-      1,
-      2,
-      0,
-      5,
-      1,
-      "AUDIO"
-    ],
-    [
-      2,
-      2,
-      0,
-      6,
-      1,
-      "AUDIO"
-    ],
-    [
-      3,
-      3,
-      0,
-      5,
-      0,
-      "ROFORMER_MODEL"
-    ],
-    [
-      4,
-      4,
-      0,
-      6,
-      0,
-      "ROFORMER_MODEL"
-    ],
-    [
-      5,
-      5,
-      0,
-      7,
-      0,
-      "ROFORMER_STEMS"
-    ],
-    [
-      6,
-      5,
-      0,
-      13,
-      0,
-      "ROFORMER_STEMS"
-    ],
-    [
-      7,
-      6,
-      0,
-      8,
-      0,
-      "ROFORMER_STEMS"
-    ],
-    [
-      8,
-      7,
-      0,
-      9,
-      0,
-      "AUDIO"
-    ],
-    [
-      9,
-      8,
-      0,
-      9,
-      1,
-      "AUDIO"
-    ],
-    [
-      10,
-      7,
-      0,
-      10,
-      0,
-      "AUDIO"
-    ],
-    [
-      11,
-      8,
-      0,
-      10,
-      1,
-      "AUDIO"
-    ],
-    [
-      12,
-      2,
-      0,
-      10,
-      8,
-      "AUDIO"
-    ],
-    [
-      13,
-      9,
-      0,
-      11,
-      0,
-      "AUDIO"
-    ],
-    [
-      14,
-      10,
-      0,
-      12,
-      0,
-      "AUDIO"
-    ],
-    [
-      15,
-      9,
-      0,
-      14,
-      0,
-      "AUDIO"
-    ]
+  [
+   2,
+   2,
+   0,
+   6,
+   1,
+   "AUDIO"
+  ],
+  [
+   3,
+   3,
+   0,
+   5,
+   0,
+   "ROFORMER_MODEL"
+  ],
+  [
+   4,
+   4,
+   0,
+   6,
+   0,
+   "ROFORMER_MODEL"
+  ],
+  [
+   5,
+   5,
+   0,
+   7,
+   0,
+   "ROFORMER_STEMS"
+  ],
+  [
+   6,
+   5,
+   0,
+   13,
+   0,
+   "ROFORMER_STEMS"
+  ],
+  [
+   7,
+   6,
+   0,
+   8,
+   0,
+   "ROFORMER_STEMS"
+  ],
+  [
+   8,
+   7,
+   0,
+   9,
+   0,
+   "AUDIO"
+  ],
+  [
+   9,
+   8,
+   0,
+   9,
+   1,
+   "AUDIO"
+  ],
+  [
+   10,
+   7,
+   0,
+   10,
+   0,
+   "AUDIO"
+  ],
+  [
+   11,
+   8,
+   0,
+   10,
+   1,
+   "AUDIO"
+  ],
+  [
+   12,
+   2,
+   0,
+   10,
+   3,
+   "AUDIO"
+  ],
+  [
+   13,
+   9,
+   0,
+   11,
+   0,
+   "AUDIO"
+  ],
+  [
+   14,
+   10,
+   0,
+   12,
+   0,
+   "AUDIO"
+  ],
+  [
+   15,
+   9,
+   0,
+   14,
+   0,
+   "AUDIO"
   ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {},
+ "version": 0.4
 }
