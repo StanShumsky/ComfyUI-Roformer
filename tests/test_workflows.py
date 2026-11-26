@@ -91,3 +91,12 @@ def test_example_workflow(nodes, workflow):
             options = getattr(inputs[name], "options", None)
             if options is not None:
                 assert value in options, (node["type"], name)
+
+
+def test_ensemble_uses_current_native_audio_saver():
+    data = json.loads((ROOT / "example_workflows" / "roformer_ensemble.json").read_text())
+    by_id = {node["id"]: node for node in data["nodes"]}
+    for node_id in (11, 12):
+        node = by_id[node_id]
+        assert node["type"] == "SaveAudioAdvanced"
+        assert node["widgets_values"][1] == "flac"

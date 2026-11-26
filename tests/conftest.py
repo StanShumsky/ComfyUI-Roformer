@@ -70,6 +70,12 @@ def _install_stubs() -> None:
 
     mm.load_model_gpu = load_model_gpu
     mm.soft_empty_cache = lambda: None
+    mm.throw_exception_if_processing_interrupted = lambda: None
+
+    class InterruptProcessingException(BaseException):
+        pass
+
+    mm.InterruptProcessingException = InterruptProcessingException
     mp = types.ModuleType("comfy.model_patcher")
 
     class CoreModelPatcher:
@@ -98,10 +104,17 @@ def _install_stubs() -> None:
     class ProgressBar:
         def __init__(self, total):
             self.total = total
+            self.current = 0
             self.done = 0
 
+        def update_absolute(self, value, total=None):
+            if total is not None:
+                self.total = total
+            self.current = min(value, self.total)
+            self.done = self.current
+
         def update(self, n):
-            self.done += n
+            self.update_absolute(self.current + n)
 
     cu.ProgressBar = ProgressBar
     comfy.model_management = mm

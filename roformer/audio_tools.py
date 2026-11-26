@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import torch
 
+import comfy.model_management as mm
+
 # ------------------------------------------------- pitch & tempo
 
 def pitch_shift(wave: torch.Tensor, sr: int, semitones: float, time_correct: bool) -> torch.Tensor:
@@ -16,15 +18,19 @@ def pitch_shift(wave: torch.Tensor, sr: int, semitones: float, time_correct: boo
     AND the length changes by 2 ** (-semitones / 12)."""
     import librosa
     if time_correct:
+        mm.throw_exception_if_processing_interrupted()
         y = librosa.effects.pitch_shift(wave.numpy(), sr=sr, n_steps=semitones)
+        mm.throw_exception_if_processing_interrupted()
         return torch.from_numpy(asfloat32(y))
     # raise the pitch by resampling DOWN (fewer samples, played back at sr): the new
     # length is N * 2 ** (-semitones / 12)
     factor = 2 ** (semitones / 12)
     target = sr / factor
-    out = [torch.from_numpy(asfloat32(librosa.resample(
-        wave[ch].numpy(), orig_sr=sr, target_sr=target, res_type="soxr_hq")))
-        for ch in range(wave.shape[0])]
+    out = []
+    for ch in range(wave.shape[0]):
+        mm.throw_exception_if_processing_interrupted()
+        y = librosa.resample(wave[ch].numpy(), orig_sr=sr, target_sr=target, res_type="soxr_hq")
+        out.append(torch.from_numpy(asfloat32(y)))
     return torch.stack(out)
 
 
@@ -32,7 +38,9 @@ def time_stretch(wave: torch.Tensor, sr: int, rate: float) -> torch.Tensor:
     """Stretch `wave` (C, N) by `rate` (1.0 = as-is, > 1 = shorter), pitch preserved -
     a phase-vocoder pass at `sr`."""
     import librosa
+    mm.throw_exception_if_processing_interrupted()
     y = librosa.effects.time_stretch(wave.numpy(), rate=rate)
+    mm.throw_exception_if_processing_interrupted()
     return torch.from_numpy(asfloat32(y))
 
 
@@ -56,8 +64,10 @@ def detect_key(wave: torch.Tensor, sr: int) -> tuple[str, float]:
     (typical range 0.5-0.9 on clean vocals)."""
     import librosa
     import numpy as np
+    mm.throw_exception_if_processing_interrupted()
     y = wave.mean(0).numpy()
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)  # (12, frames)
+    mm.throw_exception_if_processing_interrupted()
     profile = chroma.mean(axis=1)
     p = torch.from_numpy(profile.astype("float32"))
     best_key, best_r = "", 0.0

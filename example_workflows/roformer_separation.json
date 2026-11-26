@@ -58,7 +58,8 @@
       "properties": {},
       "widgets_values": [
         "sw-6stem",
-        "auto"
+        "auto",
+        "float32"
       ]
     },
     {

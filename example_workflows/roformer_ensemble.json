@@ -89,7 +89,8 @@
    "properties": {},
    "widgets_values": [
     "sw-6stem",
-    "auto"
+    "auto",
+    "float32"
    ]
   },
   {
@@ -124,7 +125,8 @@
    "properties": {},
    "widgets_values": [
     "hyperace-v2-voc",
-    "auto"
+    "auto",
+    "float32"
    ]
   },
   {
@@ -431,7 +433,7 @@
   },
   {
    "id": 11,
-   "type": "SaveAudio",
+   "type": "SaveAudioAdvanced",
    "pos": [
     1680,
     60
@@ -454,7 +456,7 @@
    "properties": {},
    "widgets_values": [
     "roformer/ensemble/vocals",
-    "file"
+    "flac"
    ]
   },
   {
@@ -484,7 +486,7 @@
   },
   {
    "id": 12,
-   "type": "SaveAudio",
+   "type": "SaveAudioAdvanced",
    "pos": [
     1680,
     400
@@ -507,7 +509,7 @@
    "properties": {},
    "widgets_values": [
     "roformer/ensemble/instrumental_exact",
-    "file"
+    "flac"
    ]
   },
   {

@@ -15,18 +15,23 @@ alignment with the exact residual), **Pitch Shift**, **Time Stretch**, and **Key
 From the ComfyUI-Manager: *Manager → Install Custom Nodes* → search for **ComfyUI-Roformer**
 → Install; Manager installs its requirements as well.
 
-Or clone it manually:
+Or clone it manually (requires Python 3.10+ and ComfyUI 0.11.0+):
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/StanShumsky/ComfyUI-Roformer
-pip install -r ComfyUI-Roformer/requirements.txt
+python -m pip install ./ComfyUI-Roformer
 ```
 
-Restart ComfyUI. That's it — models download automatically on first use (45 MB – 1.7 GB)
-into `ComfyUI/models/roformer/`. You can also use your own copies: a `.ckpt`/`.pth`
-checkpoint with its config YAML in any subfolder of `models/roformer` shows up in the
-loader.
+`pip install -r ComfyUI-Roformer/requirements.txt` remains available for an existing
+checkout. Restart ComfyUI after installing or updating.
+
+Models download automatically on first use (45 MB – 1.7 GB) into
+`ComfyUI/models/roformer/`. Complete local checkpoints and configs are reused without a
+network request. Set `HF_HUB_OFFLINE=1` only after the required files are installed. You
+can also use your own copies: a `.ckpt`/`.pth` checkpoint with its config YAML in any
+subfolder of `models/roformer` shows up in the loader. Keep one checkpoint per folder;
+if a folder contains several, the first one (alphabetical) is used.
 
 ## Quick start
 
@@ -39,6 +44,24 @@ loader.
 The loader defaults to `sw-6stem` — six stems at once (bass, drums, other, vocals,
 guitar, piano). For vocals / instrumental, pick one of the two-way models
 ([Models](#models)).
+
+## Performance and VRAM
+
+GPU is strongly recommended — the models are designed for CUDA, and slow-but-working CPU
+runs are a fallback. The keys that matter most:
+
+- **`precision`** (Loader) — `float32` (default) reproduces the released inference path.
+  `float16` runs eligible layers under CUDA autocast: noticeably faster and lower on GPU
+  memory, with small numerical changes. The weights stay float32; CPU and MPS runs stay
+  float32 even when `float16` is selected.
+- **`chunk_seconds`** (Separate) — `0` uses the model's own training window (about 11–22 s).
+  A positive value processes shorter windows in a few extra passes, which lowers GPU memory
+  at the cost of some time. That is usually the cheapest fix on a small GPU.
+- **Batch size** — a batched input is processed in groups of at most four songs per model
+  pass, and the node automatically shrinks the group on out-of-memory errors (logged).
+  Lowering the window is usually more helpful than raising the batch size.
+- **Model size** — the large mel-band models (1.5–1.7 GB checkpoints) need the most headroom;
+  start with a smaller or two-way model if you are tight on memory.
 
 ## Nodes
 
@@ -55,26 +78,32 @@ All nodes are in the `audio/Roformer` category.
 - `device` — `auto` (ComfyUI's session device policy for auxiliary models: honors
   `--gpu-only` and falls back to the CPU on machines without usable VRAM), `cuda`, `mps`,
   `cpu`.
+- `precision` — `float32` (default, the released inference path) or `float16` (opt-in CUDA
+  autocast for eligible layers). Weights remain float32; CPU and MPS runs stay float32 even
+  when `float16` is selected. See [Performance and VRAM](#performance-and-vram).
 
-The weights ride in system RAM and occupy the GPU only while a separation is running —
-ComfyUI's model management evicts them when other nodes need the VRAM, so the loader
-composes with any other model in the graph.
+The weights start in system RAM. ComfyUI's managed model loader keeps a model on the GPU
+while it fits and evicts it under memory pressure or when another model needs the VRAM —
+fast sequential runs, without fighting the rest of the graph for memory.
 
 - Outputs: the model payload, and `stems` — the model's stem names as text, in the order the
   model trained them in; preview with any text display or wire it where you like.
 
 ### Roformer Separate
-Runs the loaded model on the audio input — any sample rate (resampled internally to 44.1
-kHz) and any channel count (downmixed / upmixed to the model's trained count).
+Runs the loaded model on the audio input — any sample rate and any channel count (multichannel
+input is averaged to mono, then copied to both channels for a stereo model; a mono model receives
+the mono downmix). Every output stem is padded or trimmed to the source's exact length at the file's
+own sample rate.
 - `model` — from the Loader.
 - `audio` — the mix to separate (from **Load Audio**, or the audio track of a loaded
-  video). A batched `(B, C, N)` audio separates every element at once (one at a time on
-  the GPU, staged in RAM) — the stems payload comes back batched.
+  video). A batched `(B, C, N)` audio separates every element, up to four per model pass,
+  and automatically splits into smaller groups on OOM — the stems payload comes back
+  batched.
 - `chunk_seconds` — `0` (default) uses the model's own training window (about 11–22 s);
   set a positive value to use less VRAM. Longer audio is processed in overlapping windows
   with a crossfade, so the output is exactly the length of the input. If a window runs out
-  of GPU memory the node halves it and retries (up to three times, logged) before raising
-  an actionable error.
+  of memory the node halves it and retries (up to three times, logged), then splits the
+  batch into smaller groups before raising an actionable error.
 - `tta` — test-time augmentation: the model also runs on the time-flipped mix and the two
   runs are averaged per stem. Doubles the run time; smooths flaky transients and edge
   artifacts. The exact-decomposition property survives — the averaged stems still sum to
@@ -97,14 +126,10 @@ ensemble: every slot, algorithm and option is in the workflow file.
 - `audio` slots (2–8) — the same stem from one model run each.
 - `algorithm`
   - `average` (default) — a plain time-domain mean;
-  - `max spec` — per STFT bin, keep the value of the input with the larger magnitude
-    (phase included) — each model's most confident content; the leaderboard choice for
-    vocals;
+  - `max spec` — per frequency bin, keep the value of the input with the larger magnitude
+    (each model's most confident content); the leaderboard choice for vocals;
   - `min spec` — the smaller magnitude — suppresses leakage; the leaderboard choice for
     the instrumental.
-
-  The spectral algorithms are the exact per-bin magnitude-selection math of The Ultimate
-  Vocal Remover's ensemble (Hann 2048/1024 STFT, the winner's complex value kept).
 - `normalize` — `off` (default); `anti clip` scales a clipping blend (peak above 1.0) back
   to full scale — never raises a quiet result; `full scale` always rescales to peak 1.0.
 - `align` — search a small time offset (up to the advanced `align_max_seconds`, default
@@ -116,8 +141,8 @@ ensemble: every slot, algorithm and option is in the workflow file.
   subtract for the instrumental — blend + output == mix holds exactly.
 - `mix` — the original mix (from **Load Audio**); required when `invert` is on, ignored
   otherwise.
-- Advanced: `align_max_seconds` (0.0625–2 s search radius) and `n_fft` (STFT window for
-  the spectral algorithms, 512–8192; 2048 is what the mvsep winners use).
+- Advanced: `align_max_seconds` (how far the align search can reach, 0.0625–2 s) and
+  `n_fft` (the STFT window for the spectral algorithms, 512–8192 — leave the default unless you know why not).
 
 `example_workflows/roformer_ensemble.json` is the two-model recipe: the mix runs through
 `sw-6stem` and a two-way vocal model, **max spec** blends the two vocals, and a second
@@ -129,35 +154,28 @@ Aligns one recording to a reference so two files from different sessions (differ
 takes, trims, or tools) can be ensembled or A/B'd. Connect the **reference** (the track
 to align to, e.g. the original mix or the first model's run) and the **input** (the
 track to be aligned): one song each, the same sample rate and channel count, at least
-one second. The search runs the phase check, a cross-correlation pass over several
-candidate shifts, and an optional per-window refinement, then keeps the candidate with
-the quietest residual. Outputs: **aligned** (the input with the offset removed and the
-gain / phase corrected — feed it to an Ensemble slot next to the reference) and
-**inverted** (reference minus the aligned input — what the alignment removed,
-sample-exact).
+one second. The node searches candidate shifts, scores the residual, and keeps the
+quietest result. Outputs: **aligned** (the input with the offset removed and the gain /
+phase corrected — feed it to an Ensemble slot next to the reference) and **inverted**
+(reference minus the aligned input — what the alignment removed, sample-exact).
 - `reference` — the track to align to (e.g. the original mix, or the first model's run).
 - `input` — the track to be aligned (same sample rate and channel count as the
   reference).
-- `phase` — `automatic` (default): flip the input if it starts phase-inverted (the
-  correlation check on the first 1000 samples); `positive` / `negative` force the sign;
-  `native` leaves it as-is.
-- `match_silence` — equalize the leading silence of the two tracks first (for files
-  trimmed or exported differently). Off: the cross-correlation search handles the
-  offset.
-- `intro_analysis` — where the first alignment pass samples its 1 s segments:
-  `default` (one position at 1/10 of the length), `1/8`…`1/2` (that single fraction),
-  `shifts: low` / `medium` / `high` (several fractions — every unique shift becomes a
-  candidate).
+- `phase` — `automatic` (default): flips the input if it starts phase-inverted;
+  `positive` / `negative` force the sign; `native` leaves it as-is.
+- `match_silence` — equalizes the leading silence of the two tracks first (for files
+  trimmed or exported differently). Off: the search handles the offset directly.
+- `intro_analysis` — where the search samples its segments: `default` (one position near
+  the start), `1/8`…`1/2` (that single fraction), or `shifts: low / medium / high` (several
+  positions — more candidates, slower).
 - Advanced (each one refines the search — and slows it down):
-  - `align_window` — `off` (the global search only — fast) or a Hanning window size
+  - `align_window` — `off` (the global search only — fast) or a window size
     (`0.0625 s`…`2 s`, or `shifts: low / medium / high` for several sizes): the track is
     re-aligned inside every sliding window — for pairs with local timing drift.
-  - `volume_analysis` — gain corrections tried on the input: `off` (none), `low`
-    (0–7 dB in 1 dB steps), `medium` (0–11 dB in 1 dB), `high` (0–12 dB in 0.5 dB),
-    `very high` (0–20 dB in 0.5 dB — the largest grid, the slowest).
-  - `phase_shifts` — Hilbert phase rotations tried on the input, in degrees: `off`
-    (none), or `180`…`1` as the step (smaller step = more rotations; `1` tries all of
-    them — the largest grid, the slowest).
+  - `volume_analysis` — gain corrections tried on the input (`off`, `low`, `medium`,
+    `high`, `very high`): more steps = more candidates, slower.
+  - `phase_shifts` — phase rotations tried on the input, in degrees (`off` or `180`…`1` as
+    the step): smaller step = more rotations, slower.
 
 ### Roformer Pitch Shift
 Shifts the pitch by semitones at the audio's own sample rate. A batched input shifts
@@ -165,36 +183,32 @@ every element.
 - `audio` — the audio to shift, any sample rate (stays at its own rate).
 - `semitones` — the shift in semitones, 0.5 steps, −24…+24 (default 0; 12 = one octave
   up, −12 = one octave down).
-- `time_correct` — on (default): a phase-vocoder pass — the pitch moves, the length
-  stays; off: the classic resample — the pitch moves AND the length changes by
-  2^(−semitones/12).
+- `time_correct` — on (default): the pitch moves and the length stays; off: the classic
+  resample — the pitch moves AND the length changes by 2^(−semitones/12).
 
 ### Roformer Time Stretch
-Stretches the tempo without changing the pitch, at the audio's own sample rate (a
-phase-vocoder pass). A batched input stretches every element.
+Stretches the tempo without changing the pitch, at the audio's own sample rate. A batched
+input stretches every element.
 - `audio` — the audio to stretch, any sample rate (stays at its own rate).
 - `rate` — the tempo factor (default 1.0, 0.25–4.0): 2.0 = twice as fast (half the
   length), 0.5 = half speed (double the length). The pitch is preserved.
 
 ### Roformer Key Detect
-Detects the musical key: the mean chroma pitch-class profile correlated against all 24
-Krumhansl–Schmuckler key profiles (major and minor at every tonic).
+Detects the musical key by comparing the mean chroma profile against all major and minor
+profiles (24 keys).
 - `audio` — the audio to analyse; feed it the separated vocals (the clearest tonal
   source) when you have them rather than the full mix. A batched input is detected on
   its first element (logged).
-- Output `key` — a string like `A minor (confidence 0.72)`: 0.5–0.9 is typical on clean
-  vocals; below about 0.5 the audio is tonally ambiguous.
+- Output `key` — a string like `A minor (confidence 0.72)`: a higher confidence is a
+  clearer tonal signal.
 
 ### Roformer To Audio
 Extracts one stem from a stems payload as `AUDIO` for feeding any other node. A batched
-payload comes back batched. `stem` is a
-dropdown of every stem name the pack knows about, sorted by priority (vocals first, then the
-instrumental, drums, bass, guitar, piano, other) and merged case-insensitively — one
-`vocals`, one `instrument`, one `other`, regardless of how the model spells them (the model's
-own list is on the Loader's `stems` output). Matching is the mirror image — case-insensitive
-and alias-tolerant (`instrument` picks a payload's `Instrumental`) — so `(auto)` (the default,
-the model's target) or a stale choice always falls back to the first stem and can never fail
-a run.
+payload comes back batched. `stem` is a dropdown of every stem name the pack knows about,
+sorted by priority (vocals first, then the instrumental, drums, bass, guitar, piano, other),
+matched case-insensitively — `(auto)` (the default) selects the model's target stem, and a
+stale or misspelled choice falls back to the first stem, so a run never fails on a stem
+name. The model's own list is on the Loader's `stems` output.
 
 ### Custom Roformer To Audio
 The same extraction with the stem **typed by hand** instead of picked from the dropdown —
@@ -208,9 +222,8 @@ stems payload (from a batched Separate) writes one file per element — WAV suff
 `_b001..`, FLAC numbered sequentially.
 - `stems` — the stems payload from Separate.
 - `filename_prefix` — the output file name (without extension; subfolders allowed).
-- `format` — `wav` (lossless float32, what the audio nodes work with) or `flac` (lossless,
-  smaller, written through the native ComfyUI audio saver so the workflow prompt is embedded
-  in the file metadata).
+- `format` — `wav` or `flac` (both lossless; `flac` is smaller and stores the workflow
+  prompt in the file's metadata).
 - `normalize` — `off` (default); `anti clip` scales a clipping stem back to full scale
   before writing — never raises a quiet stem; `full scale` always rescales every stem to
   peak 1.0.
@@ -220,13 +233,11 @@ The separation summary as a JSON string, for branching or saving run metadata.
 
 ## Models
 
-All 41 checkpoints, in the same order as the loader dropdown: multi-stem first (by stem
-count), then the specialists, then the two-way models by
-[mvsep.com](https://mvsep.com/quality_checker/multisong_leaderboard) leaderboard quality
-(vocals-target before instrumental-target), experimental weights last. "vocals + residual"
-means the model predicts vocals and the rest of the mix comes back as the other stem
-(`-inst` models work the other way round); multi-stem models emit every stem natively.
-SDR is the mvsep.com quality score (higher = better). Sizes are the download sizes.
+All 41 checkpoints, in the same order as the loader dropdown. "vocals + residual" means
+the model predicts vocals and the rest of the mix comes back as the other stem (`-inst`
+models work the other way round); multi-stem models emit every stem natively. SDR is the
+quality score from the [mvsep.com](https://mvsep.com/quality_checker/multisong_leaderboard)
+tables (higher = better). Sizes are the download sizes.
 
 ### Multi-stem
 
@@ -330,26 +341,42 @@ Separate** on the roomy vocal → **Roformer To Audio** (the model's target, `no
 or save it. The model splits the input into the dry `noreverb` component and the
 `reverb` component; the wet part is the other stem, if you want it.
 
-## Feature coverage (RoFormer scope)
+## Troubleshooting
 
-Every RoFormer-relevant feature of the standard separation workflow has a home in this
-pack: the 41-checkpoint model lineup, per-stem extraction (To Audio / Custom),
-enhancement chains (the graph itself — To Audio feeds another Separate), device policy
-(`auto` = the session's auxiliary-model policy; the weights ride in RAM and are evicted
-per run), OOM resilience (the auto half-window retry — not a "lower the segment size"
-message), output naming (prefix subfolders, per-stem files, no overwrites, files linked
-on the node), ensembling (max / min spec / average, exact residual, TTA, 2–8 inputs —
-the mvsep-winning recipes), the audio tools (Align, Pitch Shift, Time Stretch, Key
-Detect), and settings persistence (the workflow graph is the recipe). Out of scope, by
-design: Demucs / MDX-Net / MDX23 / RVB (other architecture families).
+- **CUDA out of memory:** the node first halves the window (down to one second, at most
+  three times), then splits a batch. For a persistent OOM, set `chunk_seconds` to `5`, select
+  `precision = float16`, reduce the batch, or choose `device = cpu`. The large mel-band
+  models need substantially more activation memory than their checkpoint size suggests.
+- **Slow repeated runs:** a model that was already loaded is reused. If another model in the
+  graph evicts it, the next separation pays a reload cost — that is expected behavior, not a
+  bug.
+- **CPU/MPS precision:** `float16` is CUDA-only. CPU and MPS keep float32 — converting the
+  weights to half would break the model's internal math.
+- **Download or gated-model errors:** sign in with `HF_TOKEN` or `huggingface-cli login` for
+  gated repositories. Complete local files are reused offline. If a download leaves an
+  incomplete model folder, remove that incomplete folder and retry; the loader requires both
+  the checkpoint and its matching YAML.
+- **Local model not listed:** use a subfolder of `models/roformer` containing a `.ckpt` or
+  `.pth` and a YAML config. Multiple YAMLs make the selection ambiguous; keep the model's
+  matching config beside its checkpoint.
+- **Malformed/empty audio:** make sure the audio has a non-empty batch, channels and time
+  axis, and a positive sample rate. Outputs keep the source rate and exact length.
+- **Ensemble errors:** connect one song per input, with matching sample rate and channel
+  count. `invert` additionally requires the original mix at that same rate/channel count.
+- **Interruption:** ComfyUI's stop/cancel signal is checked during loading, processing and
+  other long loops, and cancellation is never mistaken for an out-of-memory error.
+
+Only load checkpoints and YAML configs from sources you trust. Roformer files use PyTorch
+checkpoint deserialization and community YAML tuple tags; they are data files, not a safe
+format for untrusted uploads. The pack checks strict state-dict compatibility and obvious
+NaN/Inf/zero corruption, but does not pin cryptographic hashes for third-party releases.
 
 ## Tests
 
-- `pytest tests` — the unit suite: no weights, no ComfyUI install, no network (CPU, seconds).
+- `pip install -r requirements-dev.txt`, then `pytest tests` — the unit suite: no weights,
+  no ComfyUI install, no network, runs on CPU in seconds.
 - `RUN_RF_WEIGHTS=1 pytest tests` — the integration suite: downloads the real `sw-6stem`
-  and `melband-small` checkpoints once and runs the nodes end to end (separation, the
-  stems-decompose-the-mix guarantee, both save formats, stem extraction) on ComfyUI's own
-  device selection.
+  and `melband-small` checkpoints once and runs the nodes end to end.
 
 **Licensing.** Code: see `LICENSE`. Checkpoints: each Hugging Face repo carries its own license/terms —
 at least two (Revive, Resurrection) have open commercial-use permission threads, so check

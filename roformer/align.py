@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import torch
 
+import comfy.model_management as mm
+
 from . import ensemble
 
 # ------------------------------------------------- option tables (the search grids)
@@ -84,6 +86,7 @@ def _silence_end(wav: torch.Tensor, frame: int = 1024, threshold: float = 0.01) 
     channel with the most energy) whose peak exceeds `threshold`."""
     x = wav[int(torch.argmax(torch.abs(wav).sum(1)))]
     for i in range(0, x.numel(), frame):
+        mm.throw_exception_if_processing_interrupted()
         if x[i:i + frame].abs().max() > threshold:
             return i
     return x.numel()
@@ -129,6 +132,7 @@ def intro_align_variants(ref: torch.Tensor, wav: torch.Tensor, sr: int,
     seconds = min(ref.shape[-1], wav.shape[-1]) // sr
     variants: list[torch.Tensor] = []
     for sec_len in intro_divs:
+        mm.throw_exception_if_processing_interrupted()
         sec_seg = 1 if sec_len == 1 else int(seconds // sec_len)
         idx = sr * sec_seg
         # Score on the left channel (both channels are available; the left's lag wins);
@@ -182,6 +186,7 @@ def phase_shifted_tracks(track: torch.Tensor, step: int) -> list[torch.Tensor]:
     end = 180 - (180 % step) if 180 % step == 0 else 181
     out = [track, -track]
     for i in range(step, end, step):
+        mm.throw_exception_if_processing_interrupted()
         out.append(phase_shift_hilbert(track, i))
         out.append(phase_shift_hilbert(track, -i))
     return out
@@ -197,6 +202,7 @@ def ensemble_wav(waveforms: list[torch.Tensor], split_size: int = 240) -> torch.
     n = len(parts[0])
     out: list[torch.Tensor] = []
     for i in range(n):
+        mm.throw_exception_if_processing_interrupted()
         means = torch.stack([parts[c][i].abs().mean() for c in range(len(waveforms))])
         out.append(parts[int(torch.argmin(means))][i])
     return torch.cat(out, dim=-1)
@@ -227,6 +233,7 @@ def time_correction(mix: torch.Tensor, inst: torch.Tensor, windows: list[float],
     base_db, db_range = db_analysis
     subs: list[torch.Tensor] = []
     for secs in windows:
+        mm.throw_exception_if_processing_interrupted()
         window_size = int(sr * secs)
         step_size = int(sr * secs / 2)
         window = torch.hann_window(window_size, periodic=False)
@@ -234,18 +241,21 @@ def time_correction(mix: torch.Tensor, inst: torch.Tensor, windows: list[float],
         divider = torch.zeros_like(mix)
         n_fft = 1 << (2 * window_size - 1).bit_length()
         for i in range(0, max(mix.shape[-1] - window_size + 1, 1), step_size):
+            mm.throw_exception_if_processing_interrupted()
             wm = mix[:, i:i + window_size] * window
             wi = inst[:, i:i + window_size] * window
             # The variant set for this window: the phase set of the instrumental,
             # every member scaled by the base dB and each per-dB adjustment
             phase_set = [wi] if phase_step == 190 else phase_shifted_tracks(wi, phase_step)
             for ch in range(mix.shape[0]):
+                mm.throw_exception_if_processing_interrupted()
                 wmv = wm[ch]
                 cm = torch.fft.rfft(wmv, n_fft)
                 best: torch.Tensor | None = None
                 variants = [p[ch] * (10 ** ((base_db + db) / 20))
                             for p in phase_set for db in db_range]
                 for c0 in range(0, len(variants), _VARIANT_CHUNK):
+                    mm.throw_exception_if_processing_interrupted()
                     wv = torch.stack(variants[c0:c0 + _VARIANT_CHUNK])  # (V, W)
                     corr = torch.fft.irfft(
                         torch.conj(cm)[None] * torch.fft.rfft(wv, n_fft), n_fft)

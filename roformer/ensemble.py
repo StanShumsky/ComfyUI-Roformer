@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import torch
 
+import comfy.model_management as mm
+
 ALGORITHMS = ("max spec", "min spec", "average")
 NORMALIZE_MODES = ("off", "anti clip", "full scale")
 
@@ -48,8 +50,13 @@ def blend(algorithm: str, waves: list[torch.Tensor], n_fft: int, length: int) ->
     w = [x[:, :length] for x in waves]
     if algorithm == "average":
         return torch.stack(w).sum(0) / len(w)
+    if length < n_fft:
+        # Centered STFT reflect-padding requires an input longer than n_fft // 2.
+        w = [torch.nn.functional.pad(x, (0, n_fft - length)) for x in w]
+    mm.throw_exception_if_processing_interrupted()
     acc = stft_spec(w[0], n_fft)
     for x in w[1:]:
+        mm.throw_exception_if_processing_interrupted()
         s = stft_spec(x, n_fft)
         if algorithm == "max spec":
             acc = torch.where(s.abs() >= acc.abs(), s, acc)
@@ -101,6 +108,7 @@ def align_offset(ref: torch.Tensor, wav: torch.Tensor, max_seconds: float, rate:
     region). Full rate, not a downsampled template, so the result is sample-exact for
     any signal type - a 4x coarse stage would quantise the lag and lose on aperiodic
     audio. Both signals: (C, T) float32 at `rate`."""
+    mm.throw_exception_if_processing_interrupted()
     r = ref.mean(0)
     w = wav.mean(0)
     m = min(r.numel(), w.numel())
@@ -116,4 +124,5 @@ def align_offset(ref: torch.Tensor, wav: torch.Tensor, max_seconds: float, rate:
     # (verified against a direct sum; the mirror image at c[n - k] is the -k side), so
     # the lag is the argmax of c over [-t, t] minus t
     scores = torch.cat([c[n - t:n], c[0:1], c[1:t + 1]])
+    mm.throw_exception_if_processing_interrupted()
     return int(torch.argmax(scores) - t)

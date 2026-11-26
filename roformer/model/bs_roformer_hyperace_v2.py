@@ -892,7 +892,7 @@ class BSRoformer(Module):
 
         self.stft_window_fn = partial(default(stft_window_fn, torch.hann_window), stft_win_length)
 
-        freqs = torch.stft(torch.randn(1, 4096), **self.stft_kwargs, window=torch.ones(stft_win_length), return_complex=True).shape[1]
+        freqs = stft_n_fft // 2 + 1
 
         assert len(freqs_per_bands) > 1
         assert sum(

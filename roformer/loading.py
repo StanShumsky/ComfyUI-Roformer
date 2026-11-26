@@ -100,7 +100,9 @@ def check_weights(state: dict, name: str) -> None:
     predicts garbage, so it is caught here instead."""
     checked = 0
     nonfinite, zeros = [], []
-    for key, value in state.items():
+    for index, (key, value) in enumerate(state.items()):
+        if index % 64 == 0:
+            mm.throw_exception_if_processing_interrupted()
         if not torch.is_tensor(value) or not value.is_floating_point() or value.numel() <= 100:
             continue
         checked += 1
@@ -117,8 +119,7 @@ def check_weights(state: dict, name: str) -> None:
 
 
 def download_model(model: Checkpoint, root: Path) -> Path:
-    from huggingface_hub import snapshot_download
-
+    """Fetch missing files; Hugging Face Hub honors HF_HUB_OFFLINE and its own cache/retry policy."""
     target = root / model.id
     patterns = [model.ckpt_file]
     if model.config_file:
@@ -126,10 +127,39 @@ def download_model(model: Checkpoint, root: Path) -> Path:
     else:
         patterns.append(f"{Path(model.ckpt_file).parent}/*.yaml")
     LOGGER.info("Downloading %s/%s to %s", model.repo_id, model.ckpt_file, target)
-    snapshot_download(repo_id=model.repo_id, allow_patterns=patterns, local_dir=str(target))
-    if not (target / model.ckpt_file).is_file():
-        raise FileNotFoundError(f"Download of {model.repo_id} did not produce {model.ckpt_file}.")
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(repo_id=model.repo_id, allow_patterns=patterns, local_dir=str(target))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download {model.repo_id} ({model.ckpt_file}) into {target}. "
+            "Check the network connection and Hugging Face token for gated repositories, or "
+            f"place {model.ckpt_file} and its YAML config there manually. Complete local files "
+            "are reused without network access; HF_HUB_OFFLINE=1 is appropriate only when they "
+            "are already installed."
+        ) from exc
+    required = [model.ckpt_file]
+    if model.config_file:
+        required.append(model.config_file)
+    missing = [name for name in required if not (target / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Download of {model.repo_id} did not produce {missing} in {target}; "
+            "remove the incomplete folder and retry."
+        )
     return target
+
+
+def _checkpoint_config(ckpt: Path, model: Checkpoint) -> Path | None:
+    if model.config_file:
+        preferred = ckpt.parent / Path(model.config_file).name
+        if preferred.is_file():
+            return preferred
+    siblings = sorted(ckpt.parent.glob("*.yaml"))
+    if len(siblings) == 1:
+        return siblings[0]
+    return preferred if model.config_file else None
 
 
 def _locate(ckpt_ref: str) -> tuple[Path, Path | None, Checkpoint | None]:
@@ -140,17 +170,22 @@ def _locate(ckpt_ref: str) -> tuple[Path, Path | None, Checkpoint | None]:
             raise ValueError(
                 f"Model {ckpt_ref!r} is not supported by this pack: {model.note}"
             )
+        for base in model_dirs():
+            target = base / model.id
+            ckpt = target / model.ckpt_file
+            if ckpt.is_file():
+                config = _checkpoint_config(ckpt, model)
+                if config is not None and config.is_file():
+                    return ckpt, config, model
+        local = local_models().get(model.id)
+        if local is not None and local["config"] is not None:
+            return local["ckpt"], local["config"], model
         target = download_model(model, model_dirs()[0])
         ckpt = target / model.ckpt_file
-        config = target / model.config_file if model.config_file else None
-        if config is None or not config.is_file():
-            sibs = sorted(ckpt.parent.glob("*.yaml"))
-            config = sibs[0] if len(sibs) == 1 else None
-        return ckpt, config, model
-    for base in model_dirs():
-        if (base / ckpt_ref).is_dir() and ckpt_ref in local_models():
-            info = local_models()[ckpt_ref]
-            return info["ckpt"], info["config"], None
+        return ckpt, _checkpoint_config(ckpt, model), model
+    local = local_models().get(ckpt_ref)
+    if local is not None:
+        return local["ckpt"], local["config"], None
     raise FileNotFoundError(
         f"Model {ckpt_ref!r} not found: unknown id and no local folder in "
         f"{[str(d) for d in model_dirs()]}. Known ids: {list(BY_ID)}"
@@ -204,10 +239,13 @@ def _resolve_load_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def load_roformer(ckpt_ref: str, device: str) -> dict:
+def load_roformer(ckpt_ref: str, device: str, precision: str = "float32") -> dict:
     """Build one model payload: verified weights in system RAM, its config, stem names and
     chunk geometry. The weights ride on the offload device until the Separate node's run
     loads them onto the GPU (ComfyUI's model management evicts them again on demand)."""
+    if precision not in ("float32", "float16"):
+        raise ValueError("Roformer precision must be 'float32' or 'float16'.")
+    mm.throw_exception_if_processing_interrupted()
     if device == "auto":
         # The native ComfyUI device policy for auxiliary models: honors --gpu-only and the
         # session VRAM state (a NO_VRAM session runs the model on the CPU).
@@ -225,6 +263,7 @@ def load_roformer(ckpt_ref: str, device: str) -> dict:
     cfg = load_yaml_config(config_path)
 
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    mm.throw_exception_if_processing_interrupted()
     state.pop("_metadata", None)  # torch.save state-dict artifact, not weights (some ckpts, e.g. inst-fno)
     check_weights(state, ckpt_path.name)
 
@@ -240,6 +279,7 @@ def load_roformer(ckpt_ref: str, device: str) -> dict:
     net = cls(**kwargs)
     net.load_state_dict(state, strict=True)  # hard fail: no silent partial loads
     net.eval()
+    mm.throw_exception_if_processing_interrupted()
     # Hand the weights to ComfyUI's model management (the native pattern for auxiliary
     # models): the model rides on the offload device until a run loads it onto the GPU,
     # and is evicted again when other nodes need the VRAM.
@@ -257,6 +297,7 @@ def load_roformer(ckpt_ref: str, device: str) -> dict:
         "patcher": patcher,
         "device": load_device,
         "offload_device": offload_device,
+        "precision": precision,
         "id": model.id if model is not None else ckpt_ref,
         "label": model.label if model is not None else f"{ckpt_ref} (local)",
         "family": model.family if model is not None else ("melband" if "num_bands" in mcfg else "bs"),

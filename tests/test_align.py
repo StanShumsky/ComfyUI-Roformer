@@ -32,6 +32,27 @@ def test_full_lag_recovers_known_shifts():
         assert found == -lag, (lag, found)
 
 
+def test_window_search_honors_interrupt(monkeypatch):
+    import comfy.model_management as mm
+    from roformernode.roformer import align as A
+
+    calls = 0
+
+    def interrupted():
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise mm.InterruptProcessingException()
+
+    monkeypatch.setattr(mm, "throw_exception_if_processing_interrupted", interrupted)
+    wave = _noise(44100, 3)
+
+    with pytest.raises(mm.InterruptProcessingException):
+        A.time_correction(wave, wave, [0.25], (0.0, [0.0]), 44100, 190)
+
+    assert calls == 3
+
+
 def test_check_if_phase_inverted():
     from roformernode.roformer import align as A
     x = _noise(20000, 1)
@@ -277,6 +298,26 @@ def test_pitch_shift_node(nodes):
     # uncorrected: the length halves with +12 semitones
     (raw,) = nodes.RoformerPitchShift.execute(_audio(tone), 12.0, False).args
     assert raw["waveform"][0].shape[-1] == pytest.approx(tone.shape[-1] / 2, rel=0.02)
+
+
+def test_pitch_shift_interrupts_between_channels(monkeypatch):
+    import comfy.model_management as mm
+    from roformernode.roformer.audio_tools import pitch_shift
+
+    calls = 0
+
+    def interrupted():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise mm.InterruptProcessingException()
+
+    monkeypatch.setattr(mm, "throw_exception_if_processing_interrupted", interrupted)
+
+    with pytest.raises(mm.InterruptProcessingException):
+        pitch_shift(torch.zeros(2, 1000), 44100, 1.0, False)
+
+    assert calls == 2
 
 
 def test_time_stretch_node(nodes):

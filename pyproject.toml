@@ -1,9 +1,10 @@
 [project]
 name = "comfyui-roformer"
 description = "Music source separation nodes for 41 popular RoFormer checkpoints on Hugging Face (the 13 pcunwa releases plus community releases): custom loader, chunked inference, per-bin ensemble blending (max spec / min spec / average, exact residual), audio tools (Align, Pitch Shift, Time Stretch, Key Detect), batched inputs and saving."
-version = "1.0.0"
+version = "1.1.0"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     "huggingface_hub>=0.24",
     "soundfile",
@@ -25,6 +26,10 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/StanShumsky/ComfyUI-Roformer"
+
+[tool.setuptools]
+packages = ["roformernode", "roformernode.roformer", "roformernode.roformer.model"]
+package-dir = {roformernode = ".", "roformernode.roformer" = "roformer", "roformernode.roformer.model" = "roformer/model"}
 
 [tool.comfy]
 PublisherId = "shumsky"

@@ -381,7 +381,7 @@ class MelBandRoformer(Module):
             normalized = stft_normalized
         )
 
-        freqs = torch.stft(torch.randn(1, 4096), **self.stft_kwargs, return_complex = True).shape[1]
+        freqs = stft_n_fft // 2 + 1
 
         # create mel filter bank
         # with librosa.filters.mel as in section 2 of paper

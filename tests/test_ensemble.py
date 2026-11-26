@@ -76,6 +76,18 @@ def test_blend_unknown_algorithm():
         E.blend("median", [_noise(1000)], 2048, 1000)
 
 
+@pytest.mark.parametrize("n", [1, 100, 1024])
+def test_spectral_blend_pads_short_inputs(n):
+    from roformernode.roformer import ensemble as E
+    waves = [_noise(n, 0), _noise(n, 1)]
+    padded = [torch.nn.functional.pad(x, (0, 2048 - n)) for x in waves]
+    specs = [E.stft_spec(x, 2048) for x in padded]
+    chimera = torch.where(specs[1].abs() >= specs[0].abs(), specs[1], specs[0])
+    out = E.blend("max spec", waves, 2048, n)
+    assert out.shape == (1, n) and torch.isfinite(out).all()
+    assert torch.allclose(out, E.istft_spec(chimera, 2048, n), atol=1e-5)
+
+
 def test_normalize_modes():
     from roformernode.roformer import ensemble as E
     x = _noise()
@@ -203,6 +215,10 @@ def test_ensemble_node_invert_is_exact(nodes, models_dir, tiny_model):
     with pytest.raises(ValueError, match="mix"):
         nodes.RoformerEnsemble.execute(
             {"audio0": a1, "audio1": a2}, "average", "off", False, 1.0, True, None, 2048)
+    wrong_channels = {"waveform": audio["waveform"].mean(1, keepdim=True), "sample_rate": 44100}
+    with pytest.raises(ValueError, match="mix has 1 channels"):
+        nodes.RoformerEnsemble.execute(
+            {"audio0": a1, "audio1": a2}, "average", "off", False, 1.0, True, wrong_channels, 2048)
 
 
 def test_ensemble_node_aligns_shifted_input(nodes, models_dir, tiny_model):

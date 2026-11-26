@@ -35,6 +35,7 @@ from .roformer.stem_names import ALL_STEMS, canonical
 LOGGER = logging.getLogger(__name__)
 
 CATEGORY = "audio/Roformer"
+MAX_INFERENCE_BATCH = 4  # bound activation memory; the OOM path reduces it further
 ROFORMER_MODEL = io.Custom("ROFORMER_MODEL")
 ROFORMER_STEMS = io.Custom("ROFORMER_STEMS")
 
@@ -77,7 +78,8 @@ class RoformerLoader(io.ComfyNode):
                 "release: multi-stem, karaoke, de-reverb, guitar). model: a checkpoint id, "
                 "auto-downloaded from Hugging Face into models/roformer on first use (0.2-1.7 GB), or "
                 "a folder name in that directory holding a .ckpt/.pth plus its config YAML. All models "
-                "run at their released float32 precision at 44.1 kHz; GPU strongly recommended. The big "
+                "default to their released float32 precision at 44.1 kHz, with opt-in CUDA fp16 "
+                "autocast; GPU strongly recommended. The big "
                 "mel-band models (1.5-1.7 GB) want at least 10 GB of VRAM. All 41 checkpoints are "
                 "supported: the repos that ship their own "
                 "model code (HyperACE, Large-Inst, Siamese) are loaded with exactly that code, and the "
@@ -96,8 +98,12 @@ class RoformerLoader(io.ComfyNode):
                                tooltip="Where the model runs: auto = ComfyUI's session device policy for "
                                        "auxiliary models (honors --gpu-only and a no-VRAM session); the "
                                        "others pin the run device. Weights wait in system RAM until a "
-                                       "separation runs, then move to the device and are evicted again when "
-                                       "other models need the VRAM."),
+                                       "separation runs, then stay on the device while they fit; ComfyUI "
+                                       "evicts them under memory pressure."),
+                io.Combo.Input("precision", options=["float32", "float16"], default="float32",
+                               tooltip="float32 (default) preserves the released inference path. float16 "
+                                       "uses CUDA autocast for eligible layers: faster and lower activation "
+                                       "memory, with small numerical changes; CPU/MPS runs stay float32."),
             ],
             outputs=[
                 ROFORMER_MODEL.Output(id="model", display_name="model"),
@@ -108,8 +114,8 @@ class RoformerLoader(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model: str, device: str) -> io.NodeOutput:
-        payload = load_roformer(model, device)
+    def execute(cls, model: str, device: str, precision: str = "float32") -> io.NodeOutput:
+        payload = load_roformer(model, device, precision)
         LOGGER.info("Roformer: loaded %s from %s (load %s, offload %s).",
                     payload["label"], payload["ckpt_path"], payload["device"], payload["offload_device"])
         return io.NodeOutput(payload, ", ".join(payload["stems"]))
@@ -129,7 +135,8 @@ class RoformerSeparate(io.ComfyNode):
                 "Separate the audio with the loaded model. The input is resampled to the model's "
                 "44.1 kHz (stereo, or downmixed / upmixed to the model's trained channel count) and "
                 "the stems come back at the file's own sample rate. A batched audio input (B, C, N) "
-                "separates every element - the stems payload comes back batched too. chunk_seconds: "
+                "separates every element, up to four per model pass - the stems payload comes back "
+                "batched too. chunk_seconds: "
                 "0 = the model's own training window from its config (recommended); a positive value "
                 "caps the window for low-VRAM machines (overlapping windows are overlap-added with a "
                 "linear crossfade). tta: test-time augmentation - the model also runs on the "
@@ -146,12 +153,14 @@ class RoformerSeparate(io.ComfyNode):
                                tooltip="The mix to separate, any sample rate (resampled internally to the "
                                        "model's 44.1 kHz) and any channel count (downmixed / upmixed to the "
                                        "model's trained count). A batched (B, C, N) audio separates "
-                                       "every element; the stems payload comes back batched."),
+                                       "every element, up to four per model pass; the stems payload "
+                                       "comes back batched."),
                 io.Int.Input("chunk_seconds", default=0, min=0, max=240,
                              tooltip="0 = the model's own training window from its config (recommended); a "
                                      "positive value caps the window for low-VRAM machines. If a window "
-                                     "runs out of GPU memory the node halves it and retries (up to three "
-                                     "times, logged)."),
+                                     "runs out of memory the node halves it and retries (up to three "
+                                     "times); if memory is still exhausted it splits the batch into "
+                                     "smaller groups. Retries are logged."),
                 io.Boolean.Input("tta", default=False,
                                  tooltip="Test-time augmentation: the model also runs on the time-flipped "
                                          "mix and the two runs are averaged per stem. Doubles the run "
@@ -167,12 +176,13 @@ class RoformerSeparate(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: dict, audio: dict, chunk_seconds: int = 0, tta: bool = False) -> io.NodeOutput:
+        mm.throw_exception_if_processing_interrupted()
         x, rate = audio_to_tensor(audio)
         p = model
         if p["num_channels"] == 1 and x.shape[1] > 1:
             x = x.mean(1, keepdim=True)
-        elif p["num_channels"] == 2 and x.shape[1] == 1:
-            x = x.repeat(1, 2, 1)
+        elif p["num_channels"] == 2 and x.shape[1] != 2:
+            x = x.mean(1, keepdim=True).repeat(1, 2, 1)
         x44 = resample(x, rate, p["sample_rate"])
         B = x44.shape[0]
         # Load the model onto the run device (ComfyUI's model management evicts it again when
@@ -209,23 +219,36 @@ class RoformerSeparate(io.ComfyNode):
         min_chunk = max(1024, int(p["sample_rate"]))  # one second: below this, separation degrades
         rate44 = p["sample_rate"]
         runs = 2 if tta else 1  # TTA: the flipped run doubles the work per song
-        # Progress is sized for the whole batch (per-song chunk plans at the current window;
-        # an OOM retry only overruns the tail, which the bars clamp).
-        total = 0
-        for b in range(B):
-            _, _, n_chunks = Separator.chunk_plan(x44[b].shape[-1], chunk)
-            total += n_chunks * runs + runs
+        max_batch = min(B, MAX_INFERENCE_BATCH)
+        _, _, n_chunks = Separator.chunk_plan(x44.shape[-1], chunk)
+        groups = (B + max_batch - 1) // max_batch
+        total = groups * (n_chunks + 1) * runs
         progress = ProgressBar(total)
-        stems_per_song = []
+        completed_units = 0
+        stem_groups = []
+        separator = Separator(p)
         attempts = 0
+
+        def refresh_total():
+            groups = (B - start + max_batch - 1) // max_batch
+            _, _, chunks = Separator.chunk_plan(x44.shape[-1], chunk)
+            remaining = completed_units + groups * (chunks + 1) * runs
+            progress.update_absolute(progress.current, total=remaining)
+            tq.total = remaining
+            tq.refresh()
+
         with tqdm(total=total, desc="Roformer separation") as tq:
-            for b in range(B):
+            start = 0
+            while start < B:
+                end = min(B, start + max_batch)
+                group = x44[start:end]
+                mm.throw_exception_if_processing_interrupted()
                 while True:
                     try:
-                        s = Separator(p).run(x44[b], 0, progress=progress, tqdm_bar=tq, chunk=chunk)
+                        s = separator.run(group, 0, progress=progress, tqdm_bar=tq, chunk=chunk)
                         if tta:
-                            sf_ = Separator(p).run(x44[b].flip(-1), 0, progress=progress,
-                                                   tqdm_bar=tq, chunk=chunk)
+                            sf_ = separator.run(group.flip(-1), 0, progress=progress,
+                                                tqdm_bar=tq, chunk=chunk)
                             # flipping both the run and its residual stem back keeps the
                             # mixture-minus-separation property: avg(voc) + avg(other) == mix
                             s = {k: (v + sf_[k].flip(-1)) * 0.5 for k, v in s.items()}
@@ -233,23 +256,42 @@ class RoformerSeparate(io.ComfyNode):
                     except (torch.OutOfMemoryError, RuntimeError) as exc:
                         if not _is_oom(exc):  # non-OOM errors pass through untouched
                             raise
-                        if attempts >= 3 or chunk <= min_chunk:
+                        if attempts < 3 and chunk > min_chunk:
+                            attempts += 1
+                            LOGGER.warning(
+                                "Roformer: out of memory at a %.1f s window; retrying the rest of "
+                                "the batch at %.1f s.",
+                                chunk / rate44, max(min_chunk, chunk // 2) / rate44,
+                            )
+                            chunk = max(min_chunk, chunk // 2)
+                        elif end - start > 1:
+                            max_batch = (end - start + 1) // 2
+                            end = min(B, start + max_batch)
+                            group = x44[start:end]
+                            LOGGER.warning(
+                                "Roformer: out of memory at a %.1f s window; splitting the remaining "
+                                "batch into groups of at most %d.",
+                                chunk / rate44, max_batch,
+                            )
+                        else:
                             raise ValueError(
-                                f"Roformer: out of GPU memory separating even at a "
+                                f"Roformer: out of memory separating a batch of {end - start} at a "
                                 f"{chunk / rate44:.1f} s window on {device}. Cap chunk_seconds lower, "
-                                "use a smaller model, or set the loader's device to cpu."
+                                "use a smaller batch or model, or set the loader's device to cpu."
                             ) from exc
-                        attempts += 1
-                        LOGGER.warning(
-                            "Roformer: out of memory at a %.1f s window; retrying the rest of "
-                            "the batch at %.1f s.",
-                            chunk / rate44, chunk / 2 / rate44,
-                        )
-                        chunk = max(min_chunk, chunk // 2)
                         mm.soft_empty_cache()
-                stems_per_song.append(s)
-        stems44 = {k: torch.stack([s[k] for s in stems_per_song]) for k in stems_per_song[0]}
-        stems = {k: resample(v, p["sample_rate"], rate) for k, v in stems44.items()}
+                        refresh_total()
+                _, _, chunks = Separator.chunk_plan(group.shape[-1], chunk)
+                completed_units += (chunks + 1) * runs
+                stem_groups.append(s)
+                start = end
+            progress.update_absolute(completed_units, total=completed_units)
+            tq.total = completed_units
+            tq.refresh()
+        stems44 = {k: torch.cat([s[k] for s in stem_groups], dim=0) for k in stem_groups[0]}
+        stems = {k: resample(v, p["sample_rate"], rate, length=x.shape[-1])
+                 for k, v in stems44.items()}
+        mm.throw_exception_if_processing_interrupted()
         mm.soft_empty_cache()
 
         names = list(stems.keys())
@@ -362,6 +404,7 @@ class RoformerEnsemble(io.ComfyNode):
     def execute(cls, audios: io.Autogrow.Type, algorithm: str, normalize: str, align: bool,
                 align_max_seconds: float, invert: bool, mix: dict = None,
                 n_fft: int = 2048) -> io.NodeOutput:
+        mm.throw_exception_if_processing_interrupted()
         names = sorted((k for k in (audios or {}) if audios[k] is not None),
                        key=lambda n: int(n.removeprefix("audio")))
         if len(names) < 2:
@@ -396,6 +439,7 @@ class RoformerEnsemble(io.ComfyNode):
         waves = [w[:, :length] for w in waves]
         if align:
             for i, w in enumerate(waves[1:], start=1):
+                mm.throw_exception_if_processing_interrupted()
                 off = ensemble.align_offset(waves[0], w, align_max_seconds, rate)
                 if off:
                     LOGGER.info("Roformer Ensemble: aligned input %d by %d samples (%.4f s).",
@@ -419,6 +463,11 @@ class RoformerEnsemble(io.ComfyNode):
                 raise ValueError(
                     f"Roformer Ensemble: the mix sample rate ({mrate} Hz) differs from the inputs "
                     f"({rate} Hz) - resample the mix first."
+                )
+            if mx.shape[1] != y.shape[0]:
+                raise ValueError(
+                    f"Roformer Ensemble: the mix has {mx.shape[1]} channels but the blended stem "
+                    f"has {y.shape[0]} - connect a mix with the same channel count."
                 )
             y = ensemble.exact_residual(mx[0], y)
         LOGGER.info("Roformer Ensemble: %s of %d input(s), %d samples @ %d Hz%s.",
@@ -510,6 +559,7 @@ class RoformerAlign(io.ComfyNode):
     def execute(cls, reference: dict, audio: dict, phase: str, match_silence: bool,
                 intro_analysis: str, align_window: str, volume_analysis: str,
                 phase_shifts: str) -> io.NodeOutput:
+        mm.throw_exception_if_processing_interrupted()
         ref, rate = audio_to_tensor(reference)
         wav, wrate = audio_to_tensor(audio)
         if ref.shape[0] != 1:
@@ -608,9 +658,12 @@ class RoformerPitchShift(io.ComfyNode):
 
     @classmethod
     def execute(cls, audio: dict, semitones: float, time_correct: bool = True) -> io.NodeOutput:
+        mm.throw_exception_if_processing_interrupted()
         wave, rate = audio_to_tensor(audio)
-        out = [audio_tools.pitch_shift(wave[b], rate, semitones, time_correct)
-               for b in range(wave.shape[0])]
+        out = []
+        for b in range(wave.shape[0]):
+            mm.throw_exception_if_processing_interrupted()
+            out.append(audio_tools.pitch_shift(wave[b], rate, semitones, time_correct))
         y = torch.stack(out)
         LOGGER.info("Roformer Pitch Shift: %.1f semitone(s) over %d song(s), %d samples @ %d Hz%s.",
                     semitones, wave.shape[0], y.shape[-1], rate,
@@ -650,8 +703,12 @@ class RoformerTimeStretch(io.ComfyNode):
 
     @classmethod
     def execute(cls, audio: dict, rate: float = 1.0) -> io.NodeOutput:
+        mm.throw_exception_if_processing_interrupted()
         wave, sr = audio_to_tensor(audio)
-        out = [audio_tools.time_stretch(wave[b], sr, rate) for b in range(wave.shape[0])]
+        out = []
+        for b in range(wave.shape[0]):
+            mm.throw_exception_if_processing_interrupted()
+            out.append(audio_tools.time_stretch(wave[b], sr, rate))
         y = torch.stack(out)
         LOGGER.info("Roformer Time Stretch: x%.2f over %d song(s), %d -> %d samples @ %d Hz.",
                     rate, wave.shape[0], wave.shape[-1], y.shape[-1], sr)
@@ -690,6 +747,7 @@ class RoformerKeyDetect(io.ComfyNode):
 
     @classmethod
     def execute(cls, audio: dict) -> io.NodeOutput:
+        mm.throw_exception_if_processing_interrupted()
         wave, rate = audio_to_tensor(audio)
         if wave.shape[0] > 1:
             LOGGER.info("Roformer Key Detect: %d-song batch - detecting the first element.",
